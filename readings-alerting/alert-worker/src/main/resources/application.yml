@@ -1,0 +1,36 @@
+# Secrets and endpoints come from the environment (.env in compose); nothing secret is committed.
+spring:
+  application:
+    name: alert-worker
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${VITALLINK_DB_URL}
+    username: ${VITALLINK_DB_USER}
+    password: ${VITALLINK_DB_PASSWORD}
+  flyway:
+    enabled: false   # migrations run from the one-shot flyway container (compose) or the test base
+  kafka:
+    bootstrap-servers: ${VITALLINK_KAFKA_BOOTSTRAP}
+server:
+  port: 8082
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-components: always
+      probes:
+        enabled: true
+
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      customizer: com.vitallink.readings.observability.PhiScrubbingJsonMembersCustomizer

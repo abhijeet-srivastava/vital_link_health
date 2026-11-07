@@ -1,0 +1,145 @@
+# Local stack: docker compose up -d   (first: cp .env.example .env)
+# Host ports bind to 127.0.0.1 only. Topics are created explicitly in stage 4 (auto-create is off).
+
+x-app: &app
+  restart: unless-stopped
+  environment:
+    VITALLINK_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
+    VITALLINK_DB_USER: ${POSTGRES_USER:?set in .env}
+    VITALLINK_DB_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    VITALLINK_KAFKA_BOOTSTRAP: kafka:9092
+    VITALLINK_REDIS_HOST: redis
+    VITALLINK_REDIS_PORT: "6379"
+  depends_on:
+    postgres:
+      condition: service_healthy
+    kafka:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    flyway:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    build: docker/postgres
+    image: vitallink/postgres-partman:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.9.2
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:?set in .env}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "127.0.0.1:9094:9094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 15s
+
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: applies migrations as the owner role, then exits; apps start only after it succeeds.
+  flyway:
+    image: flyway/flyway:11.7.2
+    command: migrate
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
+      FLYWAY_USER: ${POSTGRES_USER:?set in .env}
+      FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: 10
+    volumes:
+      - ./readings-alerting/db/src/main/resources/db/migration:/flyway/sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ingest-api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+      args:
+        MODULE: ingest-api
+    image: vitallink/ingest-api:dev
+    ports:
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  alert-worker:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+      args:
+        MODULE: alert-worker
+    image: vitallink/alert-worker:dev
+    ports:
+      - "127.0.0.1:8082:8082"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  query-api:
+    <<: *app
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+      args:
+        MODULE: query-api
+    image: vitallink/query-api:dev
+    ports:
+      - "127.0.0.1:8083:8083"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8083/actuator/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  pgdata:
