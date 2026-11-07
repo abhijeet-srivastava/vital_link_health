@@ -2,6 +2,8 @@
 
 Nov 5, 2026 · Abhijeet · Source of truth: [live design doc](https://claude.ai/artifact/CBKPwbpYbhHwWhCgCTvBhi)
 
+> Aligned with the `vitallink-service-implementation` skill on 2026-11-07. Where this document and the skill disagree, the skill (and `references/schema.sql` first) wins.
+
 ## Context and scope
 
 We carve **Readings & Alerting** out of the VitalLink monolith as a standalone service that ingests device vitals fast, dedupes retries, persists to PostgreSQL, and raises alerts asynchronously through Kafka. The design targets \~1M active devices and \~50M readings/day, with most traffic between 6 and 9 AM.
@@ -28,7 +30,7 @@ We carve **Readings & Alerting** out of the VitalLink monolith as a standalone s
 
 1. A device belongs to exactly one patient at a time; reassignment closes the old binding.
 2. Every reading carries a device-generated `measured_at` and a device sequence number or reading UUID.
-3. Thresholds are per patient per metric, with program-level defaults.
+3. Thresholds are per patient per measure (one band per row), with program-level defaults.
 4. Each patient has one primary coach; panel changes are rare compared to ingest.
 5. A reading older than 7 days is accepted and stored, but alerts on it are marked `LATE` and routed at lower priority. Readings older than 90 days (the hot window) are rejected with 422 and counted.
 
@@ -124,25 +126,26 @@ All endpoints are versioned under `/v1`. Devices authenticate with `X-Device-Key
 
 | Method & path | Caller | Purpose | Success |
 | --- | --- | --- | --- |
-| `POST /v1/devices/{deviceId}/readings` | Device | Ingest 1–500 readings in one batch | `202` with per-reading status: `ACCEPTED` or `DUPLICATE` |
-| `GET /v1/patients/{patientId}/readings/latest?metric=` | Coach, service | Latest reading per metric | `200` (from Redis, DB fallback) |
-| `GET /v1/patients/{patientId}/readings?metric=&from=&to=&cursor=&limit=` | Coach, service | Time-range query, keyset pagination | `200` + `next_cursor` |
+| `POST /v1/devices/{deviceId}/readings` | Device | Ingest 1–500 readings in one batch | `202` with per-reading status: `ACCEPTED`, `DUPLICATE`, `CONFLICT` or `REJECTED` |
+| `GET /v1/patients/{patientId}/readings/latest?type=` | Coach, service | Latest reading per reading type | `200` (from Redis, DB fallback) |
+| `GET /v1/patients/{patientId}/readings?type=&from=&to=&cursor=&limit=` | Coach, service | Time-range query, keyset pagination (limit ≤ 500, span ≤ 90 days) | `200` + `next_cursor` |
 | `GET /v1/coaches/{coachId}/alerts?status=OPEN&cursor=` | Coach | Alert queue, ordered by severity then age | `200` |
 | `POST /v1/alerts/{alertId}/acknowledge` | Coach | Move alert to `ACKNOWLEDGED`; needs `If-Match` version | `200` or `409` |
 | `POST /v1/alerts/{alertId}/resolve` | Coach | Close with a note | `200` or `409` |
 | `GET /v1/patients/{patientId}/summary` | Coach | AI plain-language summary of recent readings, cached 15 min | `200`, or `200` with a rule-based fallback |
-| `PUT /v1/patients/{patientId}/thresholds/{metric}` | Clinician, admin | Set thresholds; invalidates cache | `200` |
+| `PUT /v1/patients/{patientId}/thresholds/{measure}` | Clinician, admin | Replace bands (closes old rows, inserts new); invalidates cache | `200` |
+| `PUT /v1/patients/{patientId}/notification-policy` | Clinician | `IMMEDIATE` or `DAILY_DIGEST` for non-critical alerts | `200` |
 
 **Ingest request (single reading is a batch of one)**
 
 ```json
 {
-  "patient_id": "p_8f2c",
+  "patient_id": 8812,
   "readings": [
     {
-      "reading_id": "7c1e0b7a-...-uuid",
+      "reading_id": "7c1e0b7a-2f7e-4c1d-9a51-1d2b3c4d5e6f",
       "device_seq": 10422,
-      "metric": "BLOOD_PRESSURE",
+      "type": "BLOOD_PRESSURE",
       "measured_at": "2026-11-05T06:42:10Z",
       "values": {"systolic": 186, "diastolic": 94, "pulse": 78},
       "unit": "mmHg"
@@ -151,7 +154,11 @@ All endpoints are versioned under `/v1`. Devices authenticate with `X-Device-Key
 }
 ```
 
-**Errors** use RFC 7807 problem JSON: `401` bad key, `403` device not bound to that patient, `413` batch over 500, `422` validation, `429` rate limited with `Retry-After`, `503` backpressure with `Retry-After`.
+`patient_id` is the numeric id (`BIGINT` in the schema). `type` is the reading type; the evaluator splits a reading into measures (`measure_code`: systolic, diastolic, pulse ...).
+
+Per-item `status`: `ACCEPTED` (new), `DUPLICATE` (same id, same values), `CONFLICT` (same id, different values; logged as an integrity event), `REJECTED` (with a `code` such as `IMPLAUSIBLE_VALUE`, `READING_TOO_OLD`, `FUTURE_TIMESTAMP`). A batch with some rejected items still returns `202` for the rest.
+
+**Errors** use RFC 7807 problem JSON: `401` bad key, `403` device not bound to that patient at `measured_at`, `413` batch over 500, `422` malformed body, `429` rate limited with `Retry-After`, `503` backpressure with `Retry-After`.
 
 ## Low-level design
 
@@ -428,42 +435,46 @@ CREATE INDEX ix_audit_patient ON audit_log (patient_id, at);
 ```java
 // Write path
 public interface ReadingIngestService {
-  IngestResult ingest(DeviceIdentity device, IngestBatch batch);   // returns per-item ACCEPTED | DUPLICATE | REJECTED
+  IngestResult ingest(DeviceIdentity device, IngestBatch batch);   // per item: ACCEPTED | DUPLICATE | CONFLICT | REJECTED
 }
 public interface DeviceAuthenticator {
-  DeviceIdentity authenticate(String apiKey);                      // cached, constant-time compare
-  void assertBoundTo(DeviceIdentity d, long patientId, Instant at); // throws DeviceMismatchException → 403
+  DeviceIdentity authenticate(String apiKey);                      // "vl_<keyId>_<secret>": key_id lookup, constant-time HMAC compare, cached
+  void assertBoundTo(DeviceIdentity d, long patientId, Instant measuredAt); // binding at measured_at; DeviceMismatchException -> 403
 }
 public interface ReadingRepository {
   List<UUID> insertIgnoringDuplicates(List<Reading> batch);         // INSERT ... ON CONFLICT DO NOTHING RETURNING reading_uuid
-  List<Reading> findRange(long patientId, MetricType m, Instant from, Instant to, Cursor c, int limit);
+  List<ExistingHash> findPayloadHashes(long deviceId, List<ReadingKey> keys); // DUPLICATE vs CONFLICT
+  Page<Reading> findRange(long patientId, ReadingType type, Instant from, Instant to, Cursor c, int limit); // keyset, never OFFSET
 }
-public interface OutboxWriter { void append(List<OutboxEvent> events); } // same transaction as the insert
+public interface OutboxWriter { void append(List<OutboxEvent> events); } // same transaction; event_id = UUIDv7; topic set per event
 public interface LatestReadingCache {
-  void putIfNewer(long patientId, MetricType m, Reading r);        // Lua compare-and-set on measured_at
-  Optional<Reading> get(long patientId, MetricType m);
+  void putIfNewer(long patientId, ReadingType type, Reading r);     // Lua compare-and-set on measured_at; best effort
+  Optional<Reading> get(long patientId, ReadingType type);
 }
 
 // Alert path
-public interface MetricEvaluator {                                  // Strategy, one per metric type
-  MetricType supports();
-  List<Breach> evaluate(Reading r, ThresholdSet t);
+public interface MeasureEvaluator {                                 // Strategy, one per reading type
+  ReadingType supports();
+  List<Breach> evaluate(Reading r, EffectiveThresholds t);          // most severe band crossed per measure_code
 }
-public interface ThresholdProvider { ThresholdSet forPatient(long patientId, MetricType m); }
-// CachingThresholdProvider decorates DbThresholdProvider (Decorator)
+public interface ThresholdProvider { EffectiveThresholds forPatients(List<Long> patientIds); }
+// CachingThresholdProvider decorates DbThresholdProvider (Decorator); override > program default; several programs -> most conservative
 public interface AlertService {
-  Optional<Alert> raise(Breach b, Reading r);                       // idempotent; coalesces open episodes
-  Alert acknowledge(long alertId, long coachId, int expectedVersion); // optimistic lock
-  Alert resolve(long alertId, long coachId, int expectedVersion, String note);
+  BatchOutcome raiseBatch(List<BreachWithReading> breaches);        // one transaction per batch; DuplicateKeyException -> per-event fallback
+  Optional<AlertChange> raise(BreachWithReading breach);           // per-event path; duplicate occurrence = already evaluated
+  Alert acknowledge(long alertId, long coachId, int expectedVersion); // optimistic lock; 409 on mismatch
+  Alert resolve(long alertId, long coachId, int expectedVersion, String note); // note required for CRITICAL
 }
-public interface NotificationService { void notify(Alert a); }     // upsert by (alert, coach, channel)
+public interface EscalationScheduler { int escalateDue(Instant now, int limit); } // SKIP LOCKED claim; escalates each alert once
+public interface NotificationService { void record(AlertEvent event); } // ON CONFLICT (trigger_event_id, coach_id, channel) DO NOTHING
+public interface NotificationSender { int sendDue(Channel channel, int limit); } // PENDING -> SENT; provider key = notification_id
 
 // AI (off the critical path)
 public interface LlmClient { CompletableFuture<String> complete(Prompt p, Duration timeout); }
 public interface ReadingSummaryService { Summary summarize(long patientId, Duration window); } // falls back to a rule-based summary
 ```
 
-Patterns used where they pay off: **Strategy** for metric evaluators (new device types add a class, not an `if`), **Decorator** for caching, **Transactional Outbox** for reliable events, **Circuit Breaker** (Resilience4j) around the LLM and Redis. No generic base repositories or factories for their own sake.
+Patterns used where they pay off: **Strategy** for measure evaluators, one per reading type (new device types add a class, not an `if`), **Decorator** for caching, **Transactional Outbox** for reliable events, **Circuit Breaker** (Resilience4j) around the LLM and Redis. No generic base repositories or factories for their own sake.
 
 ## Alert processing
 
@@ -480,7 +491,7 @@ Every arrow is at-least-once: devices retry, the relay can re-publish, Kafka can
 | 1 | Ingest insert | Reading PK `(device_id, reading_uuid, measured_at)`; outbox row only for rows `RETURNING` says are new | Stored once, no second `readings.ingested` |
 | 2 | Outbox relay | Same UUIDv7 `event_id` on re-publish; idempotent producer | Same event id downstream, absorbed by guard 4 |
 | 3 | Evaluator, episode | Per-patient Kafka key; `FOR UPDATE` on the episode; unique active episode `(patient_id, measure_code)` | Folded into the existing alert, never a second alert |
-| 4 | Evaluator, reading | `alert_occurrence` PK `(device_id, reading_uuid, measure_code)` | Whole transaction rolls back: no count change, no new `alerts.raised` |
+| 4 | Evaluator, reading | `alert_occurrence` PK `(device_id, reading_uuid, measure_code, measured_at)` | Whole transaction rolls back: no count change, no new `alerts.raised` |
 | 5 | Notification record | `UNIQUE (trigger_event_id, coach_id, channel)` | No second row for the same change |
 | 6 | External send | `PENDING → SENT` on the row; provider idempotency key = `notification_id` | No second push or SMS |
 | 7 | Escalation | `SKIP LOCKED` claim + `status = 'OPEN'` guard; `escalate_at` cleared in the same update; `CHECK` keeps the timer only on OPEN + CRITICAL | Escalated once; other pods skip the row |
@@ -543,14 +554,16 @@ INSERT INTO alert_occurrence (device_id, reading_uuid, measure_code, measured_at
                               alert_id, observed_value, threshold_id, severity) VALUES (...);
 
 -- e) only a new episode or a severity upgrade is announced
-INSERT INTO outbox_event (event_id, event_type, aggregate_key, payload)
-VALUES ($uuidv7, 'alerts.raised', $p, '{"alert_id":..., "reason":"RAISED" | "SEVERITY_UPGRADED", ...}');
+INSERT INTO outbox_event (event_id, topic, event_type, aggregate_key, payload)
+VALUES ($uuidv7,
+        CASE WHEN $sev = 'CRITICAL' THEN 'alerts.raised.critical' ELSE 'alerts.raised' END,
+        'alerts.raised', $p, '{"alert_id":..., "reason":"RAISED" | "SEVERITY_UPGRADED", ...}');
 COMMIT;   -- then commit the Kafka offset
 ```
 
 | DB check | Stops | How |
 | --- | --- | --- |
-| `alert_occurrence` PK `(device_id, reading_uuid, measure_code)` | One reading counted twice (redelivery, relay re-publish, consumer restart) | Conflict at step d rolls back step c too; a replay after the episode was resolved would open a new alert, and the rollback removes it |
+| `alert_occurrence` PK `(device_id, reading_uuid, measure_code, measured_at)` | One reading counted twice (redelivery, relay re-publish, consumer restart) | Conflict at step d rolls back step c too; a replay after the episode was resolved would open a new alert, and the rollback removes it |
 | `ux_alert_active_episode` on `(patient_id, measure_code)` where unresolved | Two alerts for one episode | Normally prevented by the lock in step b; if two consumers race during a rebalance, the second insert fails, retries, and takes the update path |
 | `FOR UPDATE` on the episode | Lost updates to count or severity | Writers to one alert queue behind each other |
 | `CHECK (escalate_at IS NULL OR (status = 'OPEN' AND severity = 'CRITICAL'))` | A timer left running on an acknowledged, escalated or resolved alert | The database rejects any write that forgets to clear it |
@@ -739,7 +752,7 @@ A 20% breach rate is \~10M breaches/day. Episode coalescing turns that into far 
 
 - **Partitioning**: daily range partitions on `measured_at` via pg\_partman, created 7 days ahead. Queries for a patient over a window touch only those days' partitions.
 - **Retention**: after 90 days, partitions are detached, exported to Parquet on S3 (encrypted, Object Lock), and dropped; S3 lifecycle moves them to Glacier after 1 year. Retention length follows legal policy (assume 7 years).
-- **Rollups**: an hourly/daily aggregate table (min, max, avg, count per patient per metric) serves long-range trend charts and the AI summary without scanning raw rows.
+- **Rollups**: an hourly/daily aggregate table (min, max, avg, count per patient per measure) serves long-range trend charts and the AI summary without scanning raw rows.
 - **Sharding when one primary is not enough**: distribute by `patient_id` (Citus, or app-level hash routing). Every hot query is patient-scoped, so no cross-shard joins.
 - **Read path**: query-api reads from replicas; keyset pagination on `(measured_at, reading_uuid)` instead of `OFFSET`.
 
@@ -747,7 +760,7 @@ A 20% breach rate is \~10M breaches/day. Episode coalescing turns that into far 
 
 | Key | Holds | Write strategy | Invalidation |
 | --- | --- | --- | --- |
-| `latest:{patientId}:{metric}` | Latest reading | Write-through after commit, Lua compare-and-set on `measured_at` | Never stale-overwritten; TTL 7 days |
+| `latest:{patientId}:{readingType}` | Latest reading | Write-through after commit, Lua compare-and-set on `measured_at` | Never stale-overwritten; TTL 7 days |
 | `thr:{patientId}:{measureCode}` | Threshold set | Cache-aside, TTL 10 min | `DEL` on update + `thresholds.changed` event evicts the in-process Caffeine L1 |
 | `dev:{keyHash}` | Device identity + current binding | Cache-aside, TTL 5 min | Evicted on key rotation, revocation or rebinding |
 | `idem:{deviceId}:{readingUuid}` | Seen marker | `SET NX` with 24 h TTL | Expiry only; DB unique key is the real guard |
@@ -765,7 +778,7 @@ Correctness rests on database constraints, not on application locks: every stage
 
 1. **Ingest**: `INSERT … ON CONFLICT (device_id, reading_uuid, measured_at) DO NOTHING RETURNING reading_uuid`. Only newly inserted rows get an outbox event, so a retried reading is stored once and never re-enters the alert pipeline. For conflicting rows, ingest compares `payload_hash`: same values = `DUPLICATE`, different values = `CONFLICT`. Redis `SET NX` is a fast pre-check only; the constraint is the guarantee.
 2. **Outbox → Kafka**: each event gets a UUIDv7 `event_id` from the application at insert time. The relay publishes it (also as a Kafka header) with an idempotent producer and deletes the row after the broker ack. A crash between the two causes a re-publish with the same id, which step 3 absorbs.
-3. **Evaluator**: in one transaction it upserts the episode on `ux_alert_active_episode` (new alert, or `occurrence_cnt + 1` and severity upgrade), then inserts the `alert_occurrence` row. A primary-key conflict on the occurrence means the reading was already evaluated, so the whole transaction rolls back and nothing changes. New episodes, severity upgrades and escalations write an `alerts.raised` outbox row in the same transaction. Kafka offsets are committed only after the DB commit. In production these steps run once per batch of up to 500 events; any unique conflict rolls the batch back, and it is replayed one event at a time.
+3. **Evaluator**: in one transaction it locks the patient's unresolved episode for the measure (`FOR UPDATE`; `ux_alert_active_episode` is the backstop), opens a new alert or folds the breach in (`occurrence_cnt + 1`, severity upgrade), then inserts the `alert_occurrence` row. A primary-key conflict on the occurrence means the reading was already evaluated, so the whole transaction rolls back and nothing changes. New episodes and severity upgrades write an `alerts.raised` outbox row (topic `alerts.raised.critical` for CRITICAL) in the same transaction; escalations and coach actions write `alert.state_changed`. Kafka offsets are committed only after the DB commit. In production these steps run once per batch of up to 500 events; any unique conflict rolls the batch back, and it is replayed one event at a time.
 4. **Notification**: unique `(trigger_event_id, coach_id, channel)`; an external send happens only when that row moves from `PENDING` to `SENT`. Every real change carries a new event id, so it notifies again; a replay reuses the id and does not.
 
 ### Race conditions and how each is handled
@@ -831,7 +844,7 @@ The production phase reuses the same code; only the infrastructure changes (CDC 
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Devices without a stable reading UUID | Dedup breaks | Server derives a UUIDv5 from `(device_id, device_seq, measured_at, metric)`; firmware update as follow-up |
+| Devices without a stable reading UUID | Dedup breaks | Server derives a UUIDv5 from `(device_id, device_seq, measured_at, reading_type)`; firmware update as follow-up |
 | Postgres write IOPS at the 6 AM spike | Ingest latency, `503`s | Batch inserts, pre-scaled storage, shard by `patient_id` when sustained writes pass \~70% of capacity |
 | Hot patient or noisy device | One partition lags | Per-device rate limit; episode coalescing; lag alerts per partition |
 | Alert fatigue | Coaches miss real criticals | Episode coalescing, `LATE` routing, severity ordering in the queue; confirmation rule, per-patient baselines, daily digests and a new-episodes-per-coach metric |
