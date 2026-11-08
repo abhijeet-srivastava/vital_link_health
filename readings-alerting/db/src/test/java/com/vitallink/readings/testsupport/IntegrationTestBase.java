@@ -42,7 +42,7 @@ public abstract class IntegrationTestBase {
             .get();
 
     /** Tables kept across tests: migration history and reference data inserted by migrations. */
-    protected static final Set<String> KEEP_TABLES = Set.of("flyway_schema_history", "measure");
+    protected static final Set<String> KEEP_TABLES = Set.of("flyway_schema_history", "measure", "reading_type_measure");
 
     /** Schemas owned by extensions; their tables hold configuration, not test data. */
     private static final Set<String> EXTENSION_SCHEMAS = Set.of("partman");
@@ -131,9 +131,9 @@ public abstract class IntegrationTestBase {
     }
 
     /** Surefire runs with the module as working directory; walk up to the repo root (the dir holding mvnw). */
-    private static Path repoPath(String relative) {
+    protected static Path repoPath(String relative) {
         for (Path dir = Path.of("").toAbsolutePath(); dir != null; dir = dir.getParent()) {
-            if (Files.exists(dir.resolve("mvnw")) && Files.isDirectory(dir.resolve(relative))) {
+            if (Files.exists(dir.resolve("mvnw")) && Files.exists(dir.resolve(relative))) {
                 return dir.resolve(relative);
             }
         }

@@ -1,0 +1,4 @@
+# One-shot dev seeding (compose `seed` service): mints device keys, logs the demo keys, then exits.
+spring:
+  main:
+    web-application-type: none

@@ -27,6 +27,8 @@ design doc "HBox Platform - Architecture & Implementation Plan".
 | D18 | AI is advisory only, off the critical path | LLM failure can never block ingest or alerts |
 | D19 | UUIDv7 `event_id` from the application | Unique across shards; time-ordered; no DB round trip |
 | D20 | API keys as `key_id` + HMAC secret | Lookup by id; fast verification; rotation with two active keys |
+| D21 | 2026-11-08: coach queue keyset order is `(severity_rank, created_at, alert_id)`; `ix_alert_queue` ends with `alert_id` | `created_at` is not unique; without a unique tie-breaker a cursor page can skip or repeat alerts created in the same microsecond |
+| D22 | 2026-11-08: `reading_type_measure` maps reading types to measures; the evaluator splits readings with it, not `measure.reading_type` | PULSE comes from BP cuffs and pulse oximeters; one type per measure would drop pulse-ox pulse readings |
 
 ## Assumptions
 
@@ -47,3 +49,5 @@ design doc "HBox Platform - Architecture & Implementation Plan".
 | Confirmation rule for non-critical alerts | Off unless enabled per program/patient |
 | Daily digest for chronically out-of-range patients | Off unless set by a clinician |
 | Escalation window | 15 minutes, configurable per program |
+| 2026-11-08: Same PULSE thresholds whether the pulse came from a BP cuff or a pulse oximeter? | Yes, one set of PULSE bands per patient/program |
+| 2026-11-08: Seed threshold bands need clinical sign-off before any real use | Seed rows carry `created_by = 'SEED-NOT-CLINICAL'`; apps refuse to start with the `prod` profile while one exists |

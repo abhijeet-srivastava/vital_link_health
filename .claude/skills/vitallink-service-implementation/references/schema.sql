@@ -9,12 +9,21 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;   -- for the no-overlap EXCLUDE const
 CREATE TABLE measure (                     -- one row per measurable quantity
   measure_code   SMALLINT PRIMARY KEY,     -- 1 SYSTOLIC, 2 DIASTOLIC, 3 PULSE, 4 GLUCOSE, 5 SPO2, 6 WEIGHT
   name           TEXT NOT NULL UNIQUE,
-  reading_type   SMALLINT NOT NULL,        -- 1 BLOOD_PRESSURE, 2 GLUCOSE, 3 PULSE_OX, 4 WEIGHT
+  reading_type   SMALLINT NOT NULL,        -- 1 BLOOD_PRESSURE, 2 GLUCOSE, 3 PULSE_OX, 4 WEIGHT: the measure's usual
+                                           -- device type only; split readings with reading_type_measure (D22)
   unit           TEXT NOT NULL,            -- canonical unit; ingest converts (mmol/L -> mg/dL)
   min_plausible  NUMERIC(8,2) NOT NULL,    -- device-error guard, e.g. systolic 40
   max_plausible  NUMERIC(8,2) NOT NULL,    -- e.g. systolic 300
   CHECK (min_plausible < max_plausible)
 );
+
+CREATE TABLE reading_type_measure (        -- which measures a reading type carries; a measure may come from several (D22)
+  reading_type   SMALLINT NOT NULL,        -- 1 BLOOD_PRESSURE, 2 GLUCOSE, 3 PULSE_OX, 4 WEIGHT
+  measure_code   SMALLINT NOT NULL REFERENCES measure,
+  PRIMARY KEY (reading_type, measure_code)
+);
+-- Rows: (1: SYSTOLIC, DIASTOLIC, PULSE) (2: GLUCOSE) (3: SPO2, PULSE) (4: WEIGHT). PULSE is read from reading.pulse
+-- for both BP and pulse-ox rows.
 
 CREATE TABLE device (
   device_id      BIGINT PRIMARY KEY,
@@ -62,7 +71,9 @@ CREATE TABLE care_assignment (             -- who looks after a patient; drives 
   role           TEXT NOT NULL CHECK (role IN ('PRIMARY','BACKUP')),
   valid_from     TIMESTAMPTZ NOT NULL,
   valid_to       TIMESTAMPTZ,
-  PRIMARY KEY (patient_id, coach_id, role, valid_from)
+  PRIMARY KEY (patient_id, coach_id, role, valid_from),
+  CONSTRAINT ex_primary_coach_no_overlap   -- one PRIMARY at any instant, history included; handover = touching ranges
+    EXCLUDE USING gist (patient_id WITH =, tstzrange(valid_from, valid_to) WITH &&) WHERE (role = 'PRIMARY')
 );
 CREATE UNIQUE INDEX ux_primary_coach ON care_assignment (patient_id) INCLUDE (coach_id)
   WHERE role = 'PRIMARY' AND valid_to IS NULL;
@@ -169,7 +180,8 @@ CREATE TABLE alert (
   CHECK (escalate_at IS NULL OR (status = 'OPEN' AND severity = 'CRITICAL'))  -- timer only where it applies
 ) WITH (fillfactor = 80);                  -- free space per page so repeat-breach updates stay on the page (HOT)
 CREATE UNIQUE INDEX ux_alert_active_episode ON alert (patient_id, measure_code) WHERE status <> 'RESOLVED';
-CREATE INDEX ix_alert_queue ON alert (coach_id, severity_rank, created_at) WHERE status <> 'RESOLVED';
+CREATE INDEX ix_alert_queue ON alert (coach_id, severity_rank, created_at, alert_id)  -- alert_id: keyset tie-breaker (D21)
+  WHERE status <> 'RESOLVED';
 CREATE INDEX ix_alert_escalation ON alert (escalate_at) WHERE escalate_at IS NOT NULL;
 
 CREATE TABLE alert_occurrence (            -- each breaching reading folded into an episode (~10M rows/day at 20%)
@@ -180,7 +192,7 @@ CREATE TABLE alert_occurrence (            -- each breaching reading folded into
   alert_id        BIGINT NOT NULL REFERENCES alert,
   observed_value  NUMERIC(8,2) NOT NULL,
   threshold_id    BIGINT NOT NULL REFERENCES threshold_rule,  -- the exact rule version that fired
-  severity        TEXT NOT NULL,
+  severity        TEXT NOT NULL CHECK (severity IN ('CRITICAL','HIGH','MEDIUM')),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (device_id, reading_uuid, measure_code, measured_at)  -- alert idempotency key; a replay has the same measured_at
 ) PARTITION BY RANGE (measured_at);
@@ -195,7 +207,7 @@ CREATE TABLE notification (
   coach_id         BIGINT NOT NULL,
   channel          TEXT NOT NULL CHECK (channel IN ('QUEUE','PUSH','SMS','DIGEST')),
   reason           TEXT NOT NULL CHECK (reason IN ('RAISED','SEVERITY_UPGRADED','ESCALATED','REASSIGNED')),
-  severity         TEXT NOT NULL,          -- severity at the time; shown in the message
+  severity         TEXT NOT NULL CHECK (severity IN ('CRITICAL','HIGH','MEDIUM')),  -- severity at the time; shown in the message
   status           TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','SENT','FAILED')),
   attempts         INT NOT NULL DEFAULT 0,
   next_attempt_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -223,7 +235,7 @@ CREATE INDEX ix_audit_patient ON audit_log (patient_id, at);
 -- The service role gets INSERT only on audit_log (no UPDATE/DELETE); partitions are exported daily to WORM storage.
 
 -- ===== Database placement at scale =====
--- Ingest DB:   device, device_credential, device_binding, measure, reading, outbox_event, audit_log
--- Alerting DB: measure, threshold_rule, enrollment, care_assignment, notification_policy, alert,
+-- Ingest DB:   device, device_credential, device_binding, measure, reading_type_measure, reading, outbox_event, audit_log
+-- Alerting DB: measure, reading_type_measure, threshold_rule, enrollment, care_assignment, notification_policy, alert,
 --              alert_occurrence, notification, outbox_event, processed_event, audit_log
 -- Both later sharded by patient_id (device tables by device_id) so a patient's rows stay on one shard.

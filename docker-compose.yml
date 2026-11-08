@@ -1,15 +1,17 @@
 # Local stack: docker compose up -d   (first: cp .env.example .env)
 # Host ports bind to 127.0.0.1 only. Topics are created explicitly in stage 4 (auto-create is off).
 
+x-app-env: &app-env
+  VITALLINK_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
+  VITALLINK_DB_USER: vitallink_app                  # least privilege (role vitallink_service), not the owner
+  VITALLINK_DB_PASSWORD: ${VITALLINK_APP_DB_PASSWORD:?set in .env}
+  VITALLINK_KAFKA_BOOTSTRAP: kafka:9092
+  VITALLINK_REDIS_HOST: redis
+  VITALLINK_REDIS_PORT: "6379"
+
 x-app: &app
   restart: unless-stopped
-  environment:
-    VITALLINK_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
-    VITALLINK_DB_USER: ${POSTGRES_USER:?set in .env}
-    VITALLINK_DB_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-    VITALLINK_KAFKA_BOOTSTRAP: kafka:9092
-    VITALLINK_REDIS_HOST: redis
-    VITALLINK_REDIS_PORT: "6379"
+  environment: *app-env
   depends_on:
     postgres:
       condition: service_healthy
@@ -18,6 +20,8 @@ x-app: &app
     redis:
       condition: service_healthy
     flyway:
+      condition: service_completed_successfully
+    seed:
       condition: service_completed_successfully
 
 services:
@@ -74,7 +78,8 @@ services:
       timeout: 3s
       retries: 20
 
-  # One-shot: applies migrations as the owner role, then exits; apps start only after it succeeds.
+  # One-shot: applies migrations and the dev seed (db/seed) as the owner role, then exits.
+  # The beforeMigrate callback creates the apps' login user vitallink_app.
   flyway:
     image: flyway/flyway:11.7.2
     command: migrate
@@ -82,13 +87,33 @@ services:
       FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
       FLYWAY_USER: ${POSTGRES_USER:?set in .env}
       FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
-      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/seed,filesystem:/flyway/callbacks
+      FLYWAY_PLACEHOLDERS_APP_DB_PASSWORD: ${VITALLINK_APP_DB_PASSWORD:?set in .env}
       FLYWAY_CONNECT_RETRIES: 10
     volumes:
       - ./readings-alerting/db/src/main/resources/db/migration:/flyway/sql:ro
+      - ./readings-alerting/db/src/main/resources/db/seed:/flyway/seed:ro
+      - ./docker/flyway:/flyway/callbacks:ro
     depends_on:
       postgres:
         condition: service_healthy
+
+  # One-shot, dev only: mints API keys for the seeded devices and logs five demo keys
+  # (docker compose logs seed), then exits.
+  seed:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+      args:
+        MODULE: ingest-api
+    image: vitallink/ingest-api:dev
+    environment:
+      <<: *app-env
+      SPRING_PROFILES_ACTIVE: seed
+      VITALLINK_DEVICE_KEY_PEPPER: ${VITALLINK_DEVICE_KEY_PEPPER:?set in .env}
+    depends_on:
+      flyway:
+        condition: service_completed_successfully
 
   ingest-api:
     <<: *app
@@ -98,6 +123,9 @@ services:
       args:
         MODULE: ingest-api
     image: vitallink/ingest-api:dev
+    environment:
+      <<: *app-env
+      VITALLINK_DEVICE_KEY_PEPPER: ${VITALLINK_DEVICE_KEY_PEPPER:?set in .env}
     ports:
       - "127.0.0.1:8081:8081"
     healthcheck:
@@ -115,6 +143,9 @@ services:
       args:
         MODULE: alert-worker
     image: vitallink/alert-worker:dev
+    environment:
+      <<: *app-env
+      SPRING_PROFILES_ACTIVE: scheduler      # partition maintenance (stage 2); escalation joins in stage 6
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:

@@ -15,6 +15,10 @@ spring:
     redis:
       host: ${VITALLINK_REDIS_HOST}
       port: ${VITALLINK_REDIS_PORT:6379}
+vitallink:
+  device-keys:
+    pepper: ${VITALLINK_DEVICE_KEY_PEPPER:}   # HMAC pepper for device API keys (KMS in production)
+
 server:
   port: 8081
   shutdown: graceful

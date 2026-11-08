@@ -5,8 +5,10 @@ episode's state, and turn each change a coach must see into a notification.
 
 ## Severity evaluation
 
-1. Split the reading into measures (`measure.reading_type`): a BP row yields SYSTOLIC, DIASTOLIC,
-   PULSE; single-value devices use `value_num`.
+1. Split the reading into measures with `reading_type_measure` (never `measure.reading_type`, which
+   allows one device type per measure): a BP row yields SYSTOLIC, DIASTOLIC and PULSE; a pulse-ox
+   row yields SPO2 from `value_num` and PULSE from `pulse` when present; glucose and weight use
+   `value_num`. PULSE thresholds are the same whichever device measured it (open clinical decision).
 2. Effective bands for (patient, measure): patient overrides from `threshold_rule` replace program
    defaults for that measure. With several enrolled programs and no override, evaluate every
    program default and take the most severe result (open clinical decision; keep configurable).

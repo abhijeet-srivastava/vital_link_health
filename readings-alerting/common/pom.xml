@@ -16,10 +16,19 @@
     <description>Domain, ports, persistence and messaging adapters shared by the three deployables.</description>
 
     <dependencies>
-        <!-- Only observability/ uses this today; domain/ and ports/ stay framework-free. -->
+        <!-- observability/ and persistence/ use these; domain/ and ports/ stay framework-free. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-jdbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>
