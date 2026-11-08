@@ -4,7 +4,9 @@
 #   scripts/demo.sh relay    ingest, then the relay publishes one readings.ingested record (key = patient_id,
 #                            event_id header) and deletes its outbox row
 #   scripts/demo.sh critical systolic 186 -> one CRITICAL alert with escalate_at; the same readings.ingested record
-#                            replayed to Kafka -> still one alert, occurrence_cnt = 1
+#                            replayed to Kafka -> still one alert, occurrence_cnt = 1; the notifier writes QUEUE +
+#                            PUSH (both SENT) for the primary coach; the alerts.raised.critical record replayed -> no
+#                            new notification
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -89,6 +91,24 @@ alert_for_reading() {
               WHERE o.reading_uuid = '$READING_ID' AND o.measure_code = 1"
 }
 
+notifications_for_alert() {
+  psql_value "SELECT coach_id, channel, reason, severity, status, attempts FROM notification
+              WHERE alert_id = $1 ORDER BY channel, coach_id"
+}
+
+wait_group_caught_up() {
+  local group=$1 topic=$2 deadline=$((SECONDS + 30))
+  until docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+      --describe --group "$group" 2>/dev/null \
+      | awk -v t="$topic" '$2 == t && $6 != "0" && $6 != "-" { lag = 1 } END { exit lag }'; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "$group still lagging on $topic after 30s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
 wait_evaluator_caught_up() {
   local deadline=$((SECONDS + 30))
   until docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
@@ -132,6 +152,34 @@ critical() {
   alert_for_reading
   echo "== alerts for patient $PATIENT_ID SYSTOLIC not resolved (expect 1)"
   psql_value "SELECT count(*) FROM alert WHERE patient_id = $PATIENT_ID AND measure_code = 1 AND status <> 'RESOLVED'"
+  notify "$(alert_for_reading | cut -d'|' -f1)"
+}
+
+notify() {
+  local alert_id=$1 deadline before after record
+  echo "== waiting for the notifier (QUEUE + PUSH SENT for the primary coach)"
+  deadline=$((SECONDS + 30))
+  until [ "$(psql_value "SELECT count(*) FROM notification WHERE alert_id = $alert_id AND status = 'SENT'")" -ge 2 ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "no notifications after 30s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "== coach_id|channel|reason|severity|status|attempts (expect QUEUE and PUSH, CRITICAL, SENT, primary coach)"
+  notifications_for_alert "$alert_id"
+  before=$(psql_value "SELECT count(*) FROM notification WHERE alert_id = $alert_id")
+  echo "== replaying the alerts.raised.critical record (same event_id)"
+  record=$(docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+    --topic alerts.raised.critical --from-beginning --timeout-ms 10000 \
+    --property print.key=true --property print.headers=true 2>/dev/null | grep -E "\"alert_id\": ?$alert_id[,}]" | tail -1)
+  printf '%s\n' "$record" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server localhost:9092 --topic alerts.raised.critical \
+    --property parse.key=true --property parse.headers=true
+  wait_group_caught_up notifier-critical alerts.raised.critical
+  after=$(psql_value "SELECT count(*) FROM notification WHERE alert_id = $alert_id")
+  echo "== notifications for the alert before|after replay (expect equal)"
+  echo "$before|$after"
 }
 
 case "${1:-}" in

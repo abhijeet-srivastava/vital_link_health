@@ -46,6 +46,26 @@ vitallink:
   escalation:               # scheduler profile only; the window is alerting.escalation-window (applied at raise)
     poll-interval: PT5S                 # worst case an alert escalates this long after escalate_at
     batch-size: 100                     # alerts claimed per transaction (SKIP LOCKED); a tick drains full batches
+  notifier:                 # notifier and notifier-critical profiles only
+    digest-enabled: false               # open clinical decision: DAILY_DIGEST policy ignored until a clinician enables it
+    listener-concurrency: 4
+    max-retries: 3                      # redeliveries of a failing record, then <topic>.dlq
+    retry-interval: PT2S
+    sender-poll-interval: PT0.5S        # worst case a due PUSH/SMS waits this long
+    batch-size: 20                      # rows claimed per sender transaction (held during the provider calls)
+    max-attempts: 5                     # provider calls, then FAILED
+    backoff-base: PT5S                  # 5 s, 10 s, 20 s, 40 s ...
+    backoff-cap: PT5M
+    backoff-jitter: 0.2
+    provider-timeout: PT2S
+    push:                               # per pod; divide the provider's account limit by the pod count
+      capacity: 100
+      refill-per-second: 50
+      critical-reserved-share: 0.2      # only CRITICAL may use the last 20% of the bucket
+    sms:
+      capacity: 20
+      refill-per-second: 10
+      critical-reserved-share: 0.3
 
 server:
   port: 8082

@@ -66,8 +66,13 @@ Rules:
   ignored; each real change has a new event id and notifies again.
 - QUEUE rows are `SENT` immediately - the queue reads the `alert` table.
 - CRITICAL alerts and escalations are never digested, never held by the confirmation rule, and
-  travel on `alerts.raised.critical` with their own notifier group and reserved provider quota.
+  ride the critical lane: CRITICAL alerts on `alerts.raised.critical`, escalations on
+  `alert.state_changed`. Both topics are consumed by the `notifier-critical` group, each in its own
+  container, with a reserved provider quota (D32).
 - Recipients come from `care_assignment` at send time (PRIMARY, plus BACKUP for escalation).
+- PUSH falls back to SMS while the push provider's circuit is open: an SMS row is recorded for the same
+  change and coach (same delivery key, so at most one, and none when the change already pages by SMS).
+  The PUSH row stays `PENDING` and is still delivered when the circuit closes (D33).
 
 ## Escalation SLA
 

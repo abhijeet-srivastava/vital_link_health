@@ -146,8 +146,9 @@ services:
     environment:
       <<: *app-env
       # scheduler: partition maintenance + escalation (safe on several replicas); relay: local outbox relay, keep 1 replica;
-      # evaluator: readings.ingested -> alert episodes (scales with partitions)
-      SPRING_PROFILES_ACTIVE: scheduler,relay,evaluator
+      # evaluator: readings.ingested -> alert episodes (scales with partitions); notifier / notifier-critical:
+      # alert events -> notification rows -> PUSH/SMS (logging fake providers); separate pods in production (D13)
+      SPRING_PROFILES_ACTIVE: scheduler,relay,evaluator,notifier,notifier-critical
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:

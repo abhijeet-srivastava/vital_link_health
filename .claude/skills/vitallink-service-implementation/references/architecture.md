@@ -36,6 +36,11 @@ relay (Debezium CDC in production; `FOR UPDATE SKIP LOCKED` poller locally), Red
    threshold bands, writes episodes + occurrences + outbox set-based in one transaction.
 3. Relay publishes `alerts.raised` or `alerts.raised.critical` for new episodes and upgrades.
 4. Notifier writes one `notification` per change, coach and channel; senders deliver PUSH/SMS.
+   Groups `notifier` (`alerts.raised`) and `notifier-critical` (`alerts.raised.critical`, and
+   `alert.state_changed` in a container of its own, D32), one per profile; per record, offset after commit, then
+   `<topic>.dlq`. QUEUE rows are stored `SENT`. Senders claim `PENDING` rows per channel with
+   `SKIP LOCKED` (CRITICAL first; the critical pods claim CRITICAL only) within a per-provider
+   token bucket that reserves a share for CRITICAL.
 5. Escalation scheduler escalates CRITICAL alerts still `OPEN` at `escalate_at`.
 
 ### Reads
@@ -48,9 +53,9 @@ pagination only, always scoped by patient (and coach panel for coaches).
 | Topic | Key | Partitions | Producer | Consumers |
 | --- | --- | --- | --- | --- |
 | `readings.ingested` | `patient_id` | 128 | ingest outbox | evaluator |
-| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier, AI triage |
-| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group |
-| `alert.state_changed` | `patient_id` | 32 | alerting outbox | notifier (escalation, reassignment), audit export |
+| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier (group `notifier`), AI triage |
+| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group (`notifier-critical`) |
+| `alert.state_changed` | `patient_id` | 32 | alerting outbox | critical notifier group (`notifier-critical`, own container: escalation, reassignment), audit export |
 | `thresholds.changed` | `patient_id` | 8 | threshold API outbox | all pods (cache eviction) |
 | `device.binding_changed` | `device_id` | 8 | device admin outbox | ingest pods (cache eviction) |
 | `readings.ingested.retry` | `patient_id` | 128 | alert-evaluator batch listener, for an event that failed on the per-event path too (D29) | alert-evaluator (group `alert-evaluator.retry`), per record with fixed backoff, then `.dlq` |

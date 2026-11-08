@@ -48,7 +48,7 @@ The write path (left) commits a reading batch and its outbox row together, so no
 2. ingest-api checks the device is bound to the patient, validates, and inserts readings with `ON CONFLICT DO NOTHING` plus outbox rows for new readings only, in one transaction. It returns `202` with per-reading status.
 3. After commit, the latest-reading cache is updated (best-effort).
 4. The relay publishes `readings.ingested`; the evaluator raises or coalesces alerts and emits `alerts.raised`.
-5. The notification worker records one notification per coach and alert; the coach sees it in their queue via query-api.
+5. The notification worker records one notification per change, coach and channel; the coach sees the alert in their queue via query-api, and PUSH/SMS senders deliver the rest.
 
 ### Security and PHI
 
@@ -114,7 +114,7 @@ The service splits into three independently scaled deployables that share one co
 | ingest-api | Validate batch, check device↔patient binding, dedupe, bulk insert readings + outbox rows in one transaction, update latest-reading cache | CPU + DB write IOPS |
 | Outbox relay | Polls/streams outbox (Debezium CDC in prod) and publishes `readings.ingested` to Kafka, keyed by `patient_id` | Kafka throughput |
 | Threshold evaluator (alert-worker) | Consumes `readings.ingested`, loads thresholds (Redis → DB), creates Alert rows idempotently, emits `alerts.raised` | Kafka partitions |
-| Notification worker | Consumes `alerts.raised`, resolves the coach, writes Notification, pushes to the coach queue | Kafka partitions |
+| Notification worker (alert-worker) | Two consumer groups: `notifier` (`alerts.raised`) and `notifier-critical` (`alerts.raised.critical`, plus `alert.state_changed` in its own container). Resolves recipients from `care_assignment`, writes Notification rows (QUEUE rows `SENT` at once; the queue reads `alert`), and PUSH/SMS senders deliver `PENDING` rows | Kafka partitions; senders by provider rate |
 | Triage worker (AI, optional) | Adds an advisory LLM priority to an alert; timeouts fall back to the rule severity | Rate-limited, off the critical path |
 | query-api | Latest readings, time-range reads, coach alert queue; reads replicas + Redis | Read replicas |
 | Redis | Latest reading per patient, threshold cache, idempotency fast-check, rate-limit counters | Memory |
@@ -614,7 +614,7 @@ RETURNING alert_id;   -- one 'alert.state_changed' outbox row per alert
 
 ### 3. Changes into notifications
 
-The notification worker consumes `alerts.raised` and `alert.state_changed`, looks up recipients in `care_assignment`, and inserts one row per coach and channel, keyed by the event that caused it:
+The notification worker turns each change into one row per coach and channel, keyed by the event that caused it. Non-critical new episodes and upgrades arrive on `alerts.raised` (group `notifier`). CRITICAL ones arrive on `alerts.raised.critical`, and escalations and reassignments on `alert.state_changed`; both are consumed by group `notifier-critical`, each topic in its own container, so an escalation page never waits behind a non-critical backlog. Recipients are read from `care_assignment` when the event is recorded (PRIMARY, plus BACKUP for escalations). With no open PRIMARY, the alert's owner (`coach_id` in the event) is notified, so a change is never dropped:
 
 | Change | Reason | To | Channels |
 | --- | --- | --- | --- |
@@ -631,7 +631,8 @@ ON CONFLICT (trigger_event_id, coach_id, channel) DO NOTHING;   -- replay = no-o
 ```
 
 - QUEUE rows are marked `SENT` at once; the queue itself reads the `alert` table.
-- PUSH and SMS: a sender claims due `PENDING` rows with `FOR UPDATE SKIP LOCKED`, calls the provider with `notification_id` as its idempotency key, and marks `SENT`. Failures raise `attempts` and push `next_attempt_at` out with backoff; after the last try the row is `FAILED` and ops are paged.
+- PUSH and SMS: a sender claims due `PENDING` rows with `FOR UPDATE SKIP LOCKED` (CRITICAL first), calls the provider with `notification_id` as its idempotency key under a timeout and a circuit breaker, and marks `SENT`. Failures raise `attempts` and push `next_attempt_at` out with backoff (5 s doubling, capped at 5 min, with jitter). This retry is durable, so it survives a restart. After 5 calls the row is `FAILED` and ops are paged. An open circuit makes no call and uses no attempt. While the push circuit is open, an SMS row is recorded for the same change and coach and sent by the SMS sender through the SMS provider (a dummy `SMS_NOTIFIER` here). The push itself stays pending and goes out when the circuit closes, so a push outage never leaves a CRITICAL unannounced.
+- `DIGEST` rows are written only when the clinician-set `DAILY_DIGEST` policy and the `digest-enabled` flag (off by default) are both on, and never for CRITICAL or escalations.
 - The row makes the *decision* to notify exactly-once; the provider key makes the send effectively-once. Without provider support the worst case is one duplicate push, never a missed one.
 - The reopen-on-CRITICAL rule is a clinical policy and needs sign-off from the clinical lead.
 
@@ -664,7 +665,7 @@ We size for the morning burst, not the daily average: 50M readings/day averages 
 
 - `readings.ingested` has **128 partitions** keyed by `patient_id`, sized now because adding partitions later moves patients between partitions and breaks per-patient order during the change. Evaluator pods scale on consumer lag (KEDA) up to 128, pre-scaled from 5:30 AM.
 - Consumers poll up to 500 events and evaluate them **set-based in one transaction per batch** (below); thresholds come from an in-process cache, then one Redis `MGET`, then one DB query for misses.
-- Only new episodes and severity upgrades go downstream. CRITICAL ones go to their own topic, `alerts.raised.critical`, with a dedicated notifier group, so they never wait behind lower severities.
+- Only new episodes and severity upgrades go downstream. CRITICAL ones go to their own topic, `alerts.raised.critical`, with a dedicated notifier group (`notifier-critical`). That group also consumes `alert.state_changed`, which carries escalations, so neither waits behind lower severities.
 - Separate consumer groups for evaluation, notification and AI triage, so a slow LLM or SMS provider never delays alerts.
 
 ### Scaling alert processing
@@ -734,8 +735,8 @@ COMMIT;   -- then commit the batch's Kafka offsets
 
 #### 3. Critical lane and notification throughput
 
-- The evaluator writes the outbox `topic` per event; CRITICAL alerts go to `alerts.raised.critical`, with their own notifier pods and lag alert.
-- PUSH and SMS senders use a token bucket per provider. Extra rows wait as `PENDING` and drain at the provider's rate. CRITICAL keeps a reserved share of each provider's quota.
+- The evaluator writes the outbox `topic` per event; CRITICAL alerts go to `alerts.raised.critical`. Escalations are published on `alert.state_changed`. Both topics are consumed by the `notifier-critical` pods, each topic in its own container, with their own lag alert.
+- PUSH and SMS senders use a token bucket per provider, kept in each pod, so the rate is configured per pod. Extra rows wait as `PENDING` and drain at the provider's rate. CRITICAL keeps a reserved share of each provider's quota (20% for PUSH, 30% for SMS); the critical pods' senders claim CRITICAL rows only.
 - `ix_notification_due` is indexed by channel, so each channel's sender reads only its own queue.
 
 #### 4. Separate, then shard, the database
