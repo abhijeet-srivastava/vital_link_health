@@ -1,5 +1,8 @@
 package com.vitallink.readings.domain;
 
-// Placeholder referenced by ports/; fields are defined in stage 3.
-public record OutboxEvent() {
+import java.util.UUID;
+
+/** An outbox_event row. payloadJson carries IDs and values only (rule 9). */
+public record OutboxEvent(UUID eventId, String topic, String eventType, String aggregateKey, int schemaVersion,
+                          String payloadJson) {
 }

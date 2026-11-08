@@ -13,7 +13,8 @@ import org.springframework.http.ResponseEntity;
 import com.vitallink.readings.ingest.seed.DevCredentialSeeder;
 import com.vitallink.readings.testsupport.SpringIntegrationTestBase;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "vitallink.device-keys.pepper=test-pepper")
 class IngestApiApplicationTest extends SpringIntegrationTestBase {
 
     @Autowired

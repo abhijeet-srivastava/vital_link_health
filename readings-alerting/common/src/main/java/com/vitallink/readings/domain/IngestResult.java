@@ -1,5 +1,7 @@
 package com.vitallink.readings.domain;
 
-// Placeholder referenced by ports/; fields are defined in stage 3.
-public record IngestResult() {
+import java.util.List;
+
+/** One result per request item, in request order. */
+public record IngestResult(List<ItemResult> results) {
 }

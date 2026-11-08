@@ -29,6 +29,8 @@ design doc "HBox Platform - Architecture & Implementation Plan".
 | D20 | API keys as `key_id` + HMAC secret | Lookup by id; fast verification; rotation with two active keys |
 | D21 | 2026-11-08: coach queue keyset order is `(severity_rank, created_at, alert_id)`; `ix_alert_queue` ends with `alert_id` | `created_at` is not unique; without a unique tie-breaker a cursor page can skip or repeat alerts created in the same microsecond |
 | D22 | 2026-11-08: `reading_type_measure` maps reading types to measures; the evaluator splits readings with it, not `measure.reading_type` | PULSE comes from BP cuffs and pulse oximeters; one type per measure would drop pulse-ox pulse readings |
+| D23 | 2026-11-08: ingest rejections - a batch with at least one valid reading returns `202` with per-item `REJECTED` + `code`; a batch where every reading is rejected returns `422` problem+json whose `code` is the shared rejection code (e.g. `READING_TOO_OLD`, `FUTURE_TIMESTAMP`) or `READINGS_REJECTED`, with per-item `results` | Reconciles api-contracts.md (per-item status) with "rejected with `422 READING_TOO_OLD`": with nothing to accept there is no "rest" to answer `202` for, and a 4xx tells the device not to retry |
+| D24 | 2026-11-08: device bindings are read from the DB on every ingest request (one PK range query per batch); only credential rows are cached (Caffeine, 5 min, negatives included) | A rebinding must count at once: a reading attributed to the wrong patient is worse than one indexed query. Credential revocation takes up to 5 min until the Redis `dev:{keyId}` eviction tier lands |
 
 ## Assumptions
 

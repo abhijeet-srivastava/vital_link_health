@@ -64,8 +64,9 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 ```json
 { "event_id": "0192f3c4-7a1e-7b2c-9d10-5e6f7a8b9c0d", "type": "readings.ingested", "schema_version": 1,
   "patient_id": 8812, "device_id": 50311,
-  "readings": [ { "reading_uuid": "7c1e...", "reading_type": "BLOOD_PRESSURE",
+  "readings": [ { "reading_uuid": "7c1e...", "reading_type": "BLOOD_PRESSURE", "device_seq": 10422,
                   "measured_at": "2026-11-07T06:42:10Z", "systolic": 186, "diastolic": 94, "pulse": 78 } ] }
+// single-value types (glucose mg/dL, SpO2 %, weight kg) carry "value" in the canonical unit; null fields are omitted
 
 { "event_id": "...", "type": "alerts.raised", "schema_version": 1,
   "alert_id": 99102, "patient_id": 8812, "coach_id": 41, "measure": "SYSTOLIC",

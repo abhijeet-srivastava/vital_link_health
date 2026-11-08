@@ -1,5 +1,8 @@
 package com.vitallink.readings.domain;
 
-// Placeholder referenced by ports/; fields are defined in stage 3.
-public record ReadingKey() {
+import java.time.Instant;
+import java.util.UUID;
+
+/** Natural key of a reading within one device: reading PK minus device_id. measuredAt is microsecond precision. */
+public record ReadingKey(UUID readingUuid, Instant measuredAt) {
 }

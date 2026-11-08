@@ -15,15 +15,29 @@ spring:
     redis:
       host: ${VITALLINK_REDIS_HOST}
       port: ${VITALLINK_REDIS_PORT:6379}
+      timeout: 250ms           # latest-reading update is best effort: never hold a request on Redis
+      connect-timeout: 250ms
+  jackson:
+    property-naming-strategy: SNAKE_CASE
 vitallink:
   device-keys:
     pepper: ${VITALLINK_DEVICE_KEY_PEPPER:}   # HMAC pepper for device API keys (KMS in production)
+  ingest:
+    max-batch-size: 500
+    max-future-skew: PT5M      # measured_at beyond now + skew -> FUTURE_TIMESTAMP
+    # Open clinical decision (PLAN.md flags): reject readings older than this with READING_TOO_OLD.
+    # Blank disables; such readings then land in reading_default (alarmed).
+    reject-older-than: ${VITALLINK_INGEST_REJECT_OLDER_THAN:P90D}
+    latest-ttl: P30D
 
 server:
   port: 8081
   shutdown: graceful
 
 management:
+  health:
+    redis:
+      enabled: false           # Redis down must not mark ingest unhealthy (rule 4: best effort after commit)
   endpoints:
     web:
       exposure:

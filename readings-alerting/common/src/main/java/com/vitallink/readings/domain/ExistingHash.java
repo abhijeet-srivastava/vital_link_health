@@ -1,5 +1,5 @@
 package com.vitallink.readings.domain;
 
-// Placeholder referenced by ports/; fields are defined in stage 3.
-public record ExistingHash() {
+/** payload_hash of a stored reading, used to tell DUPLICATE from CONFLICT. */
+public record ExistingHash(ReadingKey key, long payloadHash) {
 }

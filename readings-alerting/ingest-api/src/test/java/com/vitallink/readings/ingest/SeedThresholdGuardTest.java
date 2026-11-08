@@ -36,7 +36,8 @@ class SeedThresholdGuardTest extends IntegrationTestBase {
                         "--spring.datasource.password=" + POSTGRES.getPassword(),
                         "--spring.kafka.bootstrap-servers=" + kafkaBootstrap(),
                         "--spring.data.redis.host=" + redisHost(),
-                        "--spring.data.redis.port=" + redisPort());
+                        "--spring.data.redis.port=" + redisPort(),
+                        "--vitallink.device-keys.pepper=test-pepper");
     }
 
     private static void insertRule(String createdBy) throws SQLException {
