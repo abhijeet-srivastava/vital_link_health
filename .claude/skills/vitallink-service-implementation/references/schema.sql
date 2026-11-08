@@ -239,3 +239,16 @@ CREATE INDEX ix_audit_patient ON audit_log (patient_id, at);
 -- Alerting DB: measure, reading_type_measure, threshold_rule, enrollment, care_assignment, notification_policy, alert,
 --              alert_occurrence, notification, outbox_event, processed_event, audit_log
 -- Both later sharded by patient_id (device tables by device_id) so a patient's rows stay on one shard.
+
+-- ===== Access: row-level security (V202611100900; role-dependent, so documented here, not applied by the
+-- conformance test) =====
+-- Role vitallink_query (query-api coach pools): SELECT reading, alert, care_assignment, measure, threshold_rule,
+-- enrollment; UPDATE alert (status, escalate_at, version, acknowledged_*, resolved_*, resolution_note);
+-- INSERT + UPDATE (valid_to) threshold_rule; INSERT outbox_event, audit_log.
+-- ALTER TABLE reading ENABLE ROW LEVEL SECURITY;  ALTER TABLE alert ENABLE ROW LEVEL SECURITY;
+-- POLICY service_all ON reading|alert TO vitallink_service USING (true) WITH CHECK (true);
+-- POLICY coach_panel ON reading|alert TO vitallink_query
+--   USING (patient_id IN (SELECT patient_id FROM care_assignment
+--          WHERE coach_id = NULLIF(current_setting('app.coach_id', true), '')::bigint
+--            AND valid_to IS NULL AND valid_from <= now()))      -- same WITH CHECK on alert
+-- FUNCTION alert_patient_id(bigint) RETURNS bigint SECURITY DEFINER  -- EXECUTE to vitallink_query only

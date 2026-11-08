@@ -34,6 +34,14 @@ class SeedThresholdGuardTest extends IntegrationTestBase {
                         "--spring.datasource.url=" + jdbcUrl(),
                         "--spring.datasource.username=" + POSTGRES.getUsername(),
                         "--spring.datasource.password=" + POSTGRES.getPassword(),
+                        // Only the guard is under test here: the coach pools may use the owner login.
+                        "--vitallink.datasource.primary.jdbc-url=" + jdbcUrl(),
+                        "--vitallink.datasource.primary.username=" + POSTGRES.getUsername(),
+                        "--vitallink.datasource.primary.password=" + POSTGRES.getPassword(),
+                        "--vitallink.datasource.replica.jdbc-url=" + jdbcUrl(),
+                        "--vitallink.datasource.replica.username=" + POSTGRES.getUsername(),
+                        "--vitallink.datasource.replica.password=" + POSTGRES.getPassword(),
+                        "--vitallink.security.jwt.secret=" + QueryApiTestSupport.JWT_SECRET,
                         "--spring.kafka.bootstrap-servers=" + kafkaBootstrap(),
                         "--spring.data.redis.host=" + redisHost(),
                         "--spring.data.redis.port=" + redisPort());

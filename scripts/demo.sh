@@ -7,10 +7,17 @@
 #                            replayed to Kafka -> still one alert, occurrence_cnt = 1; the notifier writes QUEUE +
 #                            PUSH (both SENT) for the primary coach; the alerts.raised.critical record replayed -> no
 #                            new notification
+#   scripts/demo.sh queue    coach 2 (PRIMARY of patient 2) reads their queue with a dev token and sees the patient's
+#                            unresolved SYSTOLIC alert (running 'critical' first when there is none); acknowledges it
+#                            with the current version (200), then again with the now stale one (409 + current alert);
+#                            and the same coach reading patient 3 (not in the panel) gets 403
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 INGEST_URL=${INGEST_URL:-http://localhost:8081}
+QUERY_URL=${QUERY_URL:-http://localhost:8083}
+COACH_ID=2            # dev seed: PRIMARY of patient 2 ((p - 1) % 20 + 1), BACKUP of patient 1 (p % 20 + 1)
+OUTSIDE_PATIENT_ID=3  # PRIMARY coach 3, BACKUP coach 4: not in coach 2's panel
 DEVICE_ID=2      # dev seed: device 2 is bound to patient 2 and is a demo device (key logged by the seed service)
 PATIENT_ID=2
 
@@ -182,9 +189,45 @@ notify() {
   echo "$before|$after"
 }
 
+ackable_systolic_alert() {
+  psql_value "SELECT alert_id || '|' || version FROM alert
+              WHERE patient_id = $PATIENT_ID AND measure_code = 1 AND status IN ('OPEN', 'ESCALATED')"
+}
+
+queue() {
+  local row alert_id version token
+  wait_ready "$QUERY_URL"
+  row=$(ackable_systolic_alert)
+  # An episode acknowledged by an earlier run cannot be acknowledged again; critical() resets it and opens a new one.
+  if [ -z "$row" ]; then
+    critical
+    row=$(ackable_systolic_alert)
+  fi
+  alert_id=${row%%|*}
+  version=${row##*|}
+  token=$(scripts/mint-dev-token.sh "$COACH_ID")
+  echo "== coach $COACH_ID queue (expect alert $alert_id for patient $PATIENT_ID; CRITICAL first, then oldest)"
+  curl -sS "$QUERY_URL/v1/coaches/$COACH_ID/alerts" -H "Authorization: Bearer $token"
+  echo
+  echo "== acknowledge alert $alert_id with If-Match: \"$version\" (expect 200, ETag = version + 1)"
+  curl -sS -i -X POST "$QUERY_URL/v1/alerts/$alert_id/acknowledge" -H "Authorization: Bearer $token" \
+    -H "If-Match: \"$version\"" | grep -iE '^HTTP|^ETag|"status"'
+  echo
+  echo "== acknowledge again with the stale If-Match: \"$version\" (expect 409 with the current alert)"
+  curl -sS -i -X POST "$QUERY_URL/v1/alerts/$alert_id/acknowledge" -H "Authorization: Bearer $token" \
+    -H "If-Match: \"$version\"" | grep -iE '^HTTP|^ETag|"code"'
+  echo
+  echo "== coach $COACH_ID reading patient $OUTSIDE_PATIENT_ID, who is not in the panel (expect 403, audited DENIED)"
+  curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $token" \
+    "$QUERY_URL/v1/patients/$OUTSIDE_PATIENT_ID/readings/latest?type=BLOOD_PRESSURE"
+  psql_value "SELECT action, outcome, patient_id FROM audit_log
+              WHERE actor_type = 'COACH' AND actor_id = '$COACH_ID' ORDER BY at DESC LIMIT 4"
+}
+
 case "${1:-}" in
   ingest) ingest ;;
   relay) relay ;;
   critical) critical ;;
-  *) echo "usage: $0 ingest|relay|critical" >&2; exit 2 ;;
+  queue) queue ;;
+  *) echo "usage: $0 ingest|relay|critical|queue" >&2; exit 2 ;;
 esac

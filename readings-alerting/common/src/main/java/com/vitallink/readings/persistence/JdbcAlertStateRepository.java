@@ -30,7 +30,7 @@ public class JdbcAlertStateRepository implements AlertStateRepository {
     static final String ESCALATION_ACTOR = "escalation-scheduler";
     static final String REASSIGNMENT_ACTOR = "care-team";
 
-    private static final String COLUMNS = """
+    static final String COLUMNS = """
             a.alert_id, a.patient_id, a.measure_code, a.coach_id, a.severity, a.status, a.is_late, a.escalate_at,
             a.first_seen_at, a.last_seen_at, a.occurrence_cnt, a.version, a.created_at, a.acknowledged_by,
             a.acknowledged_at, a.resolved_by, a.resolved_at""";
@@ -137,7 +137,7 @@ public class JdbcAlertStateRepository implements AlertStateRepository {
                 .optional();
     }
 
-    private static Alert alert(ResultSet rs) throws SQLException {
+    static Alert alert(ResultSet rs) throws SQLException {
         return new Alert(rs.getLong("alert_id"), rs.getLong("patient_id"), Measure.fromCode(rs.getInt("measure_code")),
                 rs.getLong("coach_id"), Severity.valueOf(rs.getString("severity")),
                 AlertStatus.valueOf(rs.getString("status")), rs.getBoolean("is_late"), instant(rs, "escalate_at"),

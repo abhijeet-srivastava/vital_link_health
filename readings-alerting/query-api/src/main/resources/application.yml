@@ -5,21 +5,58 @@ spring:
   threads:
     virtual:
       enabled: true
+  # vitallink_service login: the internal care-assignment endpoint only (no coach context, no row-level security).
   datasource:
     url: ${VITALLINK_DB_URL}
     username: ${VITALLINK_DB_USER}
     password: ${VITALLINK_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: 2
   flyway:
     enabled: false   # migrations run from the one-shot flyway container (compose) or the test base
   data:
     redis:
       host: ${VITALLINK_REDIS_HOST}
       port: ${VITALLINK_REDIS_PORT:6379}
+      timeout: 250ms           # latest-reading cache is an accelerator: Redis down falls back to the DB quickly
+      connect-timeout: 250ms
+  jackson:
+    property-naming-strategy: SNAKE_CASE   # also the latest-reading cache format written by ingest-api
+vitallink:
+  # Coach-facing pools log in as a member of vitallink_query, so row-level security applies to every query.
+  datasource:
+    primary:                   # writes (acknowledge, resolve, thresholds), panel checks and audit rows
+      jdbc-url: ${VITALLINK_DB_URL}
+      username: ${VITALLINK_QUERY_DB_USER}
+      password: ${VITALLINK_QUERY_DB_PASSWORD}
+      maximum-pool-size: 10
+    replica:                   # PHI reads; the primary locally, a streaming replica in production
+      jdbc-url: ${VITALLINK_REPLICA_DB_URL:${VITALLINK_DB_URL}}
+      username: ${VITALLINK_QUERY_DB_USER}
+      password: ${VITALLINK_QUERY_DB_PASSWORD}
+      maximum-pool-size: 10
+      read-only: true
+  security:
+    # Dev issuer: HS256 with a shared secret (scripts/mint-dev-token.sh). Production: OIDC issuer + JWKS (Part B).
+    jwt:
+      issuer: vitallink-dev
+      audience: query-api
+      secret: ${VITALLINK_DEV_JWT_SECRET:}
+  query:
+    latest-ttl: P30D           # TTL used when a DB fallback backfills latest:{patient}:{type}
+    max-range: P90D            # older data comes from the archive service
+    max-page-size: 500
+    default-page-size: 100
+    queue-page-size: 50
+
 server:
   port: 8083
   shutdown: graceful
 
 management:
+  health:
+    redis:
+      enabled: false           # Redis down degrades to DB reads; it must not mark query-api unhealthy
   endpoints:
     web:
       exposure:

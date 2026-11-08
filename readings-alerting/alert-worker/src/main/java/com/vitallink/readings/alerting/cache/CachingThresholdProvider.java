@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Expiry;
+import com.vitallink.readings.cache.CacheKeys;
 import com.vitallink.readings.domain.EffectiveThresholds;
 import com.vitallink.readings.domain.Measure;
 import com.vitallink.readings.domain.ThresholdBand;
@@ -55,7 +56,7 @@ public class CachingThresholdProvider implements ThresholdProvider {
     }
 
     static String key(long patientId, Measure measure) {
-        return "thr:" + patientId + ":" + measure.code();
+        return CacheKeys.thresholds(patientId, measure);
     }
 
     @Override

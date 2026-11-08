@@ -8,8 +8,11 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vitallink.readings.cache.RedisLatestReadingCache;
 import com.vitallink.readings.domain.ReadingValidator;
 import com.vitallink.readings.ingest.auth.CachingDeviceDirectory;
 import com.vitallink.readings.ingest.auth.HmacDeviceAuthenticator;
@@ -22,6 +25,7 @@ import com.vitallink.readings.persistence.JdbcReadingRepository;
 import com.vitallink.readings.ports.AuditWriter;
 import com.vitallink.readings.ports.DeviceAuthenticator;
 import com.vitallink.readings.ports.DeviceDirectory;
+import com.vitallink.readings.ports.LatestReadingCache;
 import com.vitallink.readings.ports.MeasureCatalog;
 import com.vitallink.readings.ports.OutboxWriter;
 import com.vitallink.readings.ports.ReadingRepository;
@@ -85,6 +89,12 @@ public class IngestConfig {
     @Bean
     ReadingValidator readingValidator(IngestProperties props) {
         return new ReadingValidator(props.maxFutureSkew(), props.rejectOlderThan());
+    }
+
+    @Bean
+    LatestReadingCache latestReadingCache(StringRedisTemplate redis, ObjectMapper json,
+                                          CircuitBreakerRegistry breakers, IngestProperties props) {
+        return new RedisLatestReadingCache(redis, json, breakers, props.latestTtl());
     }
 
     /** Breakers for best-effort calls after commit (latest-reading cache). */

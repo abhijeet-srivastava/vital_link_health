@@ -11,7 +11,12 @@ URI and a machine-readable `code`.
 | Device | `X-Device-Key: vl_<key_id>_<secret>` | `key_id` looks up the row; secret checked by constant-time HMAC compare; cached 5 min. mTLS is a later upgrade. |
 | Care coach | OIDC bearer token | Scopes `readings:read`, `alerts:read`, `alerts:write`; patient access limited to the coach's current `care_assignment` |
 | Clinician / admin | OIDC bearer token | `thresholds:write`, `policy:write` |
-| Service-to-service | OAuth2 client credentials | Narrow scopes per service |
+| Service-to-service | OAuth2 client credentials | Narrow scopes per service; `assignments:write` for `POST /internal/v1/care-assignments` |
+
+Tokens carry `sub` (coach, clinician or service id; numeric for coaches), `vl_actor`
+(`COACH`/`CLINICIAN`/`SERVICE`) and `scope`. Locally an HS256 dev issuer (`scripts/mint-dev-token.sh`);
+production uses the OIDC issuer's JWKS. Patient reads are coach-only for now (service reads need a pool
+outside the coach policy; not wired yet).
 
 ## Endpoints
 
@@ -26,6 +31,7 @@ URI and a machine-readable `code`.
 | `GET /v1/patients/{patientId}/summary` | Coach | AI summary, cached 15 min | `200` (`source: llm` or `source: rules`) |
 | `PUT /v1/patients/{patientId}/thresholds/{measure}` | Clinician | Replace bands (closes old rows, inserts new) | `200` |
 | `PUT /v1/patients/{patientId}/notification-policy` | Clinician | `IMMEDIATE` or `DAILY_DIGEST` for non-critical | `200` |
+| `POST /internal/v1/care-assignments` | Service | Make `coach_id` the patient's PRIMARY; unresolved alerts move to it | `200` + `moved_alerts` |
 
 ## Ingest
 
@@ -74,5 +80,19 @@ Cursor = opaque base64 of `(measured_at, reading_uuid)` for readings and
 
 ## Concurrency on state changes
 
-`If-Match` carries the alert `version`. A mismatch returns `409` with the current alert in the
-body so the client can redisplay without another round trip.
+`If-Match` carries the alert `version` (`"3"`, `W/"3"` or `3`); without it `428 IF_MATCH_REQUIRED`.
+`200` returns the alert with `ETag: "<new version>"`. A mismatch returns `409 ALERT_CONFLICT` with the
+current alert in `current` (and its `ETag`) so the client can redisplay without another round trip.
+Resolving a CRITICAL alert without `note` is `422 RESOLUTION_NOTE_REQUIRED`.
+
+`PUT .../thresholds/{measure}` body: `{"bands": [{"operator": "GT", "limit": 160, "severity": "HIGH"}]}`
+(one band per operator and severity; limits inside the measure's plausibility bounds; `[]` removes the
+override). Replaying the current bands is a no-op (`changed: false`, no event). A concurrent replacement
+loses with `409 THRESHOLD_CONFLICT`.
+
+## Access and audit
+
+Coach endpoints check scope and the coach's current `care_assignment` (PRIMARY or BACKUP) in the
+controller; refusals are `403 ACCESS_DENIED` and write a `DENIED` audit row with the patient concerned.
+Allowed PHI reads write an `ALLOWED` row after the read and before the response (a queue page: one row
+per patient shown). Row-level security enforces the panel again in the database.

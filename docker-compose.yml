@@ -89,6 +89,7 @@ services:
       FLYWAY_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/seed,filesystem:/flyway/callbacks
       FLYWAY_PLACEHOLDERS_APP_DB_PASSWORD: ${VITALLINK_APP_DB_PASSWORD:?set in .env}
+      FLYWAY_PLACEHOLDERS_QUERY_DB_PASSWORD: ${VITALLINK_QUERY_DB_PASSWORD:?set in .env}
       FLYWAY_CONNECT_RETRIES: 10
     volumes:
       - ./readings-alerting/db/src/main/resources/db/migration:/flyway/sql:ro
@@ -166,6 +167,14 @@ services:
       args:
         MODULE: query-api
     image: vitallink/query-api:dev
+    environment:
+      <<: *app-env
+      # Coach-facing pools log in as vitallink_query_app (row-level security applies); the replica is the primary
+      # locally. The internal care-assignment endpoint uses the vitallink_service login (VITALLINK_DB_USER).
+      VITALLINK_QUERY_DB_USER: vitallink_query_app
+      VITALLINK_QUERY_DB_PASSWORD: ${VITALLINK_QUERY_DB_PASSWORD:?set in .env}
+      VITALLINK_REPLICA_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
+      VITALLINK_DEV_JWT_SECRET: ${VITALLINK_DEV_JWT_SECRET:?set in .env}
     ports:
       - "127.0.0.1:8083:8083"
     healthcheck:

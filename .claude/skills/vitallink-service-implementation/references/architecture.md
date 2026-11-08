@@ -46,7 +46,10 @@ relay (Debezium CDC in production; `FOR UPDATE SKIP LOCKED` poller locally), Red
 ### Reads
 
 query-api reads Redis for latest values, replicas for ranges and the coach queue, keyset
-pagination only, always scoped by patient (and coach panel for coaches).
+pagination only, always scoped by patient (and coach panel for coaches). Coach-facing pools log in as
+`vitallink_query`, so PostgreSQL row-level security repeats the panel check on `reading` and `alert`
+(`SET LOCAL app.coach_id` per transaction, D34). A latest-reading cache miss falls back to the replica
+and backfills Redis through the same compare-and-set ingest uses.
 
 ## Kafka topics
 
@@ -87,6 +90,11 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
   "actor_type": "SERVICE", "actor_id": "escalation-scheduler", "alert_version": 3 }
 // reason ACKNOWLEDGED | RESOLVED | ESCALATED | REASSIGNED (from = to; adds "previous_coach_id"). actor_type COACH
 // carries the coach id as actor_id. Never the resolution note. Topic alert.state_changed, key patient_id.
+
+{ "event_id": "...", "schema_version": 1, "patient_id": 8812, "measure_code": 1,
+  "closed_threshold_ids": [301, 302], "threshold_ids": [911, 912, 913] }
+// thresholds.changed: a clinician replaced the patient's override bands for one measure (empty threshold_ids =
+// override removed, program defaults apply again). IDs only; consumers evict and reload. Key patient_id.
 ```
 
 ## Caching (Redis + in-process Caffeine L1)
