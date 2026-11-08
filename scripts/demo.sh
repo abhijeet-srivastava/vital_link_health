@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Demo against the compose stack (docker compose up -d). Subcommands are added stage by stage.
-#   scripts/demo.sh ingest   same BP batch posted twice -> ACCEPTED, then DUPLICATE; one outbox event
+#   scripts/demo.sh ingest   same BP batch posted twice -> ACCEPTED, then DUPLICATE; one reading row
+#   scripts/demo.sh relay    ingest, then the relay publishes one readings.ingested record (key = patient_id,
+#                            event_id header) and deletes its outbox row
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -54,13 +56,33 @@ JSON
   post_batch "$key" "$body"
   echo "== retry of the same batch (expect DUPLICATE)"
   post_batch "$key" "$body"
-  echo "== readings.ingested outbox events carrying reading $reading_id (expect 1)"
-  psql_value "SELECT count(*) FROM outbox_event WHERE payload->'readings' @> '[{\"reading_uuid\": \"$reading_id\"}]'"
-  echo "== outbox_event rows in total (no relay until stage 4)"
-  psql_value "SELECT count(*) FROM outbox_event"
+  echo "== reading rows for $reading_id (expect 1)"
+  psql_value "SELECT count(*) FROM reading WHERE reading_uuid = '$reading_id'"
+  READING_ID=$reading_id
+}
+
+relay() {
+  local deadline records
+  ingest
+  echo "== waiting for the relay to publish and delete the outbox row"
+  deadline=$((SECONDS + 30))
+  until [ "$(psql_value "SELECT count(*) FROM outbox_event WHERE payload->'readings' @> '[{\"reading_uuid\": \"$READING_ID\"}]'")" = 0 ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "outbox row still present after 30s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "== readings.ingested records carrying reading $READING_ID (expect 1; key = $PATIENT_ID, event_id header)"
+  records=$(docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+    --topic readings.ingested --from-beginning --timeout-ms 10000 \
+    --property print.key=true --property print.headers=true 2>/dev/null | grep "$READING_ID" || true)
+  echo "$records"
+  echo "count: $(printf '%s' "$records" | grep -c "$READING_ID" || true)"
 }
 
 case "${1:-}" in
   ingest) ingest ;;
-  *) echo "usage: $0 ingest" >&2; exit 2 ;;
+  relay) relay ;;
+  *) echo "usage: $0 ingest|relay" >&2; exit 2 ;;
 esac

@@ -1,5 +1,5 @@
 # Local stack: docker compose up -d   (first: cp .env.example .env)
-# Host ports bind to 127.0.0.1 only. Topics are created explicitly in stage 4 (auto-create is off).
+# Host ports bind to 127.0.0.1 only. Broker auto-create is off: alert-worker creates every topic on startup.
 
 x-app-env: &app-env
   VITALLINK_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
@@ -145,7 +145,8 @@ services:
     image: vitallink/alert-worker:dev
     environment:
       <<: *app-env
-      SPRING_PROFILES_ACTIVE: scheduler      # partition maintenance (stage 2); escalation joins in stage 6
+      # scheduler: partition maintenance (escalation joins in stage 6); relay: local outbox relay, keep 1 replica
+      SPRING_PROFILES_ACTIVE: scheduler,relay
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:

@@ -13,6 +13,17 @@ spring:
     enabled: false   # migrations run from the one-shot flyway container (compose) or the test base
   kafka:
     bootstrap-servers: ${VITALLINK_KAFKA_BOOTSTRAP}
+    admin:
+      fail-fast: true   # topics are created on startup (TopicsConfig); broker auto-create is off
+
+vitallink:
+  kafka:
+    replication-factor: 1   # 3 in production (min.insync.replicas follows as 2)
+  relay:                    # relay profile only
+    poll-interval: PT0.1S
+    ack-timeout: PT30S
+    max-backoff: PT5S
+
 server:
   port: 8082
   shutdown: graceful
