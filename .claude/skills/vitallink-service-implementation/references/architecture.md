@@ -53,7 +53,7 @@ pagination only, always scoped by patient (and coach panel for coaches).
 | `alert.state_changed` | `patient_id` | 32 | alerting outbox | notifier (escalation, reassignment), audit export |
 | `thresholds.changed` | `patient_id` | 8 | threshold API outbox | all pods (cache eviction) |
 | `device.binding_changed` | `device_id` | 8 | device admin outbox | ingest pods (cache eviction) |
-| `readings.ingested.retry` | `patient_id` | 128 | alert-evaluator on failure (non-blocking retry) | alert-evaluator (group `alert-evaluator.retry`), after a fixed delay |
+| `readings.ingested.retry` | `patient_id` | 128 | alert-evaluator batch listener, for an event that failed on the per-event path too (D29) | alert-evaluator (group `alert-evaluator.retry`), per record with fixed backoff, then `.dlq` |
 | `<topic>.dlq` | same | same | consumers after N retries | ops tooling |
 
 Partition counts are set up front: adding partitions later remaps keys and breaks per-patient

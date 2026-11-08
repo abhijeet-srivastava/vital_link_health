@@ -7,6 +7,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -186,6 +187,57 @@ class AlertDecisionsTest {
         EpisodePlan.Fold fold = (EpisodePlan.Fold) decisions.plan(breach(SYS_HIGH, 170, NOW), Optional.of(lateEpisode));
 
         assertThat(fold.late()).isFalse();
+    }
+
+    @Test
+    void episode_plan_matches_sequential_plan_for_mixed_severities() {
+        List<BreachWithReading> breaches = List.of(
+                breach(SYS_HIGH, 170, NOW.minusSeconds(30)),
+                breach(SYS_HIGH, 165, NOW.minusSeconds(20)),
+                breach(SYS_CRITICAL, 190, NOW.minusSeconds(10)),
+                breach(SYS_HIGH, 168, NOW));
+
+        EpisodeGroupPlan group = decisions.planEpisode(breaches, Optional.empty());
+
+        // The same breaches through plan() one at a time, carrying the episode forward as 5a does via the DB.
+        Optional<ActiveEpisode> current = Optional.empty();
+        List<EpisodePlan> sequential = new ArrayList<>();
+        for (BreachWithReading b : breaches) {
+            EpisodePlan step = decisions.plan(b, current);
+            sequential.add(step);
+            current = Optional.of(new ActiveEpisode(EpisodeGroupPlan.NEW_EPISODE, step instanceof EpisodePlan.Fold f
+                    ? f.status() : AlertStatus.OPEN, step.severity(), step.late()));
+        }
+        assertThat(group.steps()).extracting(EpisodeGroupPlan.Step::plan).containsExactlyElementsOf(sequential);
+        assertThat(group.steps()).extracting(s -> s.plan().reason().orElse(null))
+                .containsExactly(AlertChange.Reason.RAISED, null, AlertChange.Reason.SEVERITY_UPGRADED, null);
+        assertThat(group.opensEpisode()).isTrue();
+        assertThat(group.count()).isEqualTo(4);
+        assertThat(group.severity()).isEqualTo(Severity.CRITICAL);
+        assertThat(group.status()).isEqualTo(AlertStatus.OPEN);
+        assertThat(group.escalateAt()).isEqualTo(NOW.plus(WINDOW));
+        assertThat(group.firstSeen()).isEqualTo(NOW.minusSeconds(30));
+        assertThat(group.lastSeen()).isEqualTo(NOW);
+    }
+
+    @Test
+    void episode_plan_on_existing_episode_folds_and_reports_upgrade() {
+        ActiveEpisode acknowledged = new ActiveEpisode(7, AlertStatus.ACKNOWLEDGED, Severity.HIGH, true);
+
+        EpisodeGroupPlan repeats = decisions.planEpisode(List.of(breach(SYS_HIGH, 170, NOW.minusSeconds(5)),
+                breach(SYS_HIGH, 171, NOW)), Optional.of(acknowledged));
+        EpisodeGroupPlan rising = decisions.planEpisode(List.of(breach(SYS_HIGH, 170, NOW.minusSeconds(5)),
+                breach(SYS_CRITICAL, 191, NOW)), Optional.of(acknowledged));
+
+        assertThat(repeats.opensEpisode()).isFalse();
+        assertThat(repeats.upgraded()).isFalse();
+        assertThat(repeats.count()).isEqualTo(2);
+        assertThat(repeats.status()).isEqualTo(AlertStatus.ACKNOWLEDGED);
+        assertThat(repeats.late()).as("a fresh breach clears is_late").isFalse();
+        assertThat(rising.upgraded()).isTrue();
+        assertThat(rising.status()).as("reopen-on-critical flag on").isEqualTo(AlertStatus.OPEN);
+        assertThat(rising.severity()).isEqualTo(Severity.CRITICAL);
+        assertThat(rising.escalateAt()).isEqualTo(NOW.plus(WINDOW));
     }
 
     static AlertDecisions decisions(boolean reopenOnCritical) {

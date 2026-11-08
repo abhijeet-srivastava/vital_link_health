@@ -36,9 +36,13 @@ vitallink:
     late-after: P7D
     threshold-cache-ttl: PT10M
     threshold-cache-size: 200000
-    max-retries: 3                      # on readings.ingested.retry (non-blocking), then readings.ingested.dlq
+    max-retries: 3                      # on readings.ingested.retry (main topic never blocks), then readings.ingested.dlq
     retry-interval: PT5S
     listener-concurrency: 4
+    batch-max-records: 500              # one transaction per poll: <= 500 events ...
+    batch-max-wait: PT0.2S              # ... or 200 ms, whichever comes first
+    batch-min-bytes: 65536              # ~100+ events; below this the broker waits up to batch-max-wait
+    send-timeout: PT10S
 
 server:
   port: 8082

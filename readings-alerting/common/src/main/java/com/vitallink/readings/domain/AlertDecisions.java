@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.EnumMap;
@@ -89,6 +90,23 @@ public class AlertDecisions {
         AlertStatus status = reopen ? AlertStatus.OPEN : episode.status();
         return new EpisodePlan.Fold(episode.alertId(), true, reopen, severity, status, stillLate,
                 timerFor(status, severity));
+    }
+
+    /**
+     * A batch's breaches for one (patient, measure), in evaluation order, folded step by step with {@link #plan} as if
+     * each were committed before the next. Batch and per-event evaluation share this one decision function.
+     */
+    public EpisodeGroupPlan planEpisode(List<BreachWithReading> breaches, Optional<ActiveEpisode> before) {
+        List<EpisodeGroupPlan.Step> steps = new ArrayList<>(breaches.size());
+        Optional<ActiveEpisode> current = before;
+        for (BreachWithReading breach : breaches) {
+            EpisodePlan step = plan(breach, current);
+            steps.add(new EpisodeGroupPlan.Step(breach, step));
+            long alertId = current.map(ActiveEpisode::alertId).orElse(EpisodeGroupPlan.NEW_EPISODE);
+            AlertStatus status = step instanceof EpisodePlan.Fold fold ? fold.status() : AlertStatus.OPEN;
+            current = Optional.of(new ActiveEpisode(alertId, status, step.severity(), step.late()));
+        }
+        return new EpisodeGroupPlan(before, steps);
     }
 
     /** escalate_at exists only on OPEN + CRITICAL; the CHECK on alert rejects anything else. */

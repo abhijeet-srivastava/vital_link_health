@@ -18,10 +18,15 @@ import com.vitallink.readings.domain.MultiProgramPolicy;
  * @param maxRetries            attempts on readings.ingested.retry before readings.ingested.dlq
  * @param retryInterval         delay before each retry attempt (fixed, so one retry topic)
  * @param listenerConcurrency   consumer threads per pod
+ * @param batchMaxRecords       readings.ingested events per batch transaction (max.poll.records)
+ * @param batchMaxWait          longest the broker holds a fetch to fill a batch (fetch.max.wait.ms)
+ * @param batchMinBytes         fetch size that ends the wait early (fetch.min.bytes)
+ * @param sendTimeout           broker ack wait when moving a failed event to the retry topic
  */
 @ConfigurationProperties("vitallink.alerting")
 public record AlertingProperties(boolean reopenOnCritical, MultiProgramPolicy multiProgramPolicy,
                                  Duration escalationWindow, Duration lateAfter, Duration thresholdCacheTtl,
                                  long thresholdCacheSize, int maxRetries, Duration retryInterval,
-                                 int listenerConcurrency) {
+                                 int listenerConcurrency, int batchMaxRecords, Duration batchMaxWait,
+                                 int batchMinBytes, Duration sendTimeout) {
 }

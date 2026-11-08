@@ -47,7 +47,7 @@ import com.vitallink.readings.testsupport.SpringIntegrationTestBase;
  */
 abstract class EvaluatorTestSupport extends SpringIntegrationTestBase {
 
-    static final String GROUP = ReadingsIngestedListener.GROUP_ID;
+    static final String GROUP = ReadingsIngestedBatchListener.GROUP_ID;
     static final Duration WAIT = Duration.ofSeconds(30);
     static final UuidV7 IDS = new UuidV7(java.time.Clock.systemUTC());
 
@@ -148,10 +148,10 @@ abstract class EvaluatorTestSupport extends SpringIntegrationTestBase {
         return Utils.toPositive(Utils.murmur2(String.valueOf(patientId).getBytes(StandardCharsets.UTF_8))) % partitions;
     }
 
-    /** The retry-topic consumer runs in its own group: the main group id plus the retry suffix. */
+    /** The retry-topic consumer runs in its own group (ReadingsIngestedListener.GROUP_ID). */
     private boolean groupCaughtUp() throws Exception {
         String retry = KafkaTopics.retry(KafkaTopics.READINGS_INGESTED);
-        return caughtUp(GROUP, KafkaTopics.READINGS_INGESTED) && caughtUp(GROUP + ".retry", retry);
+        return caughtUp(GROUP, KafkaTopics.READINGS_INGESTED) && caughtUp(ReadingsIngestedListener.GROUP_ID, retry);
     }
 
     private boolean caughtUp(String group, String topic) throws Exception {

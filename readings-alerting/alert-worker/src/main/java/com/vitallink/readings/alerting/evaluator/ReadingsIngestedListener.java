@@ -18,14 +18,14 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 
 /**
- * readings.ingested -> {@link AlertEvaluator}, one record at a time (the batched path is stage 5b). The offset is
- * acknowledged only after the evaluation committed (rule 3). A failing record is moved to readings.ingested.retry so
- * its partition keeps flowing, and after the retries to readings.ingested.dlq (EvaluatorKafkaConfig); malformed
- * records go to the DLQ at once. The same method consumes the retry topic.
+ * readings.ingested.retry -> {@link AlertEvaluator}, one record at a time. Records arrive here only after failing on
+ * the per-event path of {@link ReadingsIngestedBatchListener}. The container's error handler retries each with a
+ * fixed backoff and then moves it to readings.ingested.dlq (EvaluatorKafkaConfig). The backoff holds only this retry
+ * partition, never the main topic (D29). The offset is acknowledged only after the evaluation committed (rule 3).
  */
 public class ReadingsIngestedListener {
 
-    public static final String GROUP_ID = "alert-evaluator";
+    public static final String GROUP_ID = ReadingsIngestedBatchListener.GROUP_ID + ".retry";
 
     private final AlertEvaluator evaluator;
     private final ObjectMapper json;
@@ -34,17 +34,15 @@ public class ReadingsIngestedListener {
     public ReadingsIngestedListener(AlertEvaluator evaluator, ObjectMapper json, MeterRegistry meters) {
         this.evaluator = evaluator;
         this.json = json;
-        this.failures = Counter.builder("vitallink.evaluator.failures")
-                .description("readings.ingested deliveries that failed (each retry counts)")
-                .register(meters);
+        this.failures = failures(meters);
     }
 
-    @KafkaListener(id = GROUP_ID, groupId = GROUP_ID, topics = KafkaTopics.READINGS_INGESTED,
-            containerFactory = "evaluatorListenerFactory")
+    @KafkaListener(id = GROUP_ID, groupId = GROUP_ID, topics = KafkaTopics.READINGS_INGESTED + ".retry",
+            containerFactory = "evaluatorRetryListenerFactory")
     public void onEvent(ConsumerRecord<String, String> record, Acknowledgment ack) throws JsonProcessingException {
         try {
-            ReadingsIngestedV1 event = parse(record.value());
-            evaluator.evaluate(event.eventId(), event.patientId(), readings(event));
+            BatchAlertEvaluator.Event event = event(json, record.value());
+            evaluator.evaluate(event.eventId(), event.patientId(), event.readings());
         } catch (JsonProcessingException | RuntimeException e) {
             failures.increment();
             throw e;
@@ -52,7 +50,15 @@ public class ReadingsIngestedListener {
         ack.acknowledge();
     }
 
-    private ReadingsIngestedV1 parse(String value) throws JsonProcessingException {
+    /** Shared by both listeners: every failed delivery of a readings.ingested event, each retry included. */
+    static Counter failures(MeterRegistry meters) {
+        return Counter.builder("vitallink.evaluator.failures")
+                .description("readings.ingested deliveries that failed (each retry counts)")
+                .register(meters);
+    }
+
+    /** Record value -> event; throws on anything that is not a readings.ingested v1 payload. */
+    static BatchAlertEvaluator.Event event(ObjectMapper json, String value) throws JsonProcessingException {
         if (value == null) {
             throw new IllegalArgumentException("readings.ingested record without a value");
         }
@@ -61,7 +67,7 @@ public class ReadingsIngestedListener {
                 || event.eventId() == null) {
             throw new IllegalArgumentException("Unsupported readings.ingested schema_version=" + event.schemaVersion());
         }
-        return event;
+        return new BatchAlertEvaluator.Event(event.eventId(), event.patientId(), readings(event));
     }
 
     /** Payload items -> domain readings. payload_hash is an ingest concern and not carried in the event. */

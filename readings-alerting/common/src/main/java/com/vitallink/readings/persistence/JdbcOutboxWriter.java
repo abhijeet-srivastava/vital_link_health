@@ -18,13 +18,19 @@ public class JdbcOutboxWriter implements OutboxWriter {
 
     @Override
     public void append(List<OutboxEvent> events) {
-        for (OutboxEvent e : events) {
-            jdbc.sql("""
-                            INSERT INTO outbox_event (event_id, topic, event_type, aggregate_key, schema_version, payload)
-                            VALUES (?, ?, ?, ?, ?, ?::jsonb)
-                            """)
-                    .params(e.eventId(), e.topic(), e.eventType(), e.aggregateKey(), e.schemaVersion(), e.payloadJson())
-                    .update();
+        if (events.isEmpty()) {
+            return;
         }
+        jdbc.sql("""
+                        INSERT INTO outbox_event (event_id, topic, event_type, aggregate_key, schema_version, payload)
+                        SELECT * FROM unnest(?::uuid[], ?::text[], ?::text[], ?::text[], ?::smallint[], ?::jsonb[])
+                        """)
+                .params(events.stream().map(e -> e.eventId().toString()).toArray(String[]::new),
+                        events.stream().map(OutboxEvent::topic).toArray(String[]::new),
+                        events.stream().map(OutboxEvent::eventType).toArray(String[]::new),
+                        events.stream().map(OutboxEvent::aggregateKey).toArray(String[]::new),
+                        events.stream().map(OutboxEvent::schemaVersion).toArray(Integer[]::new),
+                        events.stream().map(OutboxEvent::payloadJson).toArray(String[]::new))
+                .update();
     }
 }

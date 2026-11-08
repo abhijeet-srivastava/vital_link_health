@@ -1,18 +1,14 @@
 package com.vitallink.readings.alerting.config;
 
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.CooperativeStickyAssignor;
 import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.ssl.SslBundles;
@@ -24,85 +20,86 @@ import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaProducerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties.AckMode;
-import org.springframework.kafka.retrytopic.RetryTopicConfiguration;
-import org.springframework.kafka.retrytopic.RetryTopicConfigurationBuilder;
-import org.springframework.kafka.retrytopic.SameIntervalTopicReuseStrategy;
-import org.springframework.scheduling.TaskScheduler;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.DefaultErrorHandler;
+import org.springframework.util.backoff.ExponentialBackOff;
+import org.springframework.util.backoff.FixedBackOff;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.vitallink.readings.alerting.evaluator.EvaluatorDeadLetters;
 import com.vitallink.readings.messaging.KafkaTopics;
 
-import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 
 /**
- * Container and retries for the evaluator. Manual acks after the DB commit; cooperative-sticky assignment (a
- * rebalance does not stop every partition). Retries are non-blocking: a failing record is republished to
- * {@code readings.ingested.retry} and its main partition moves on at once, so one bad event cannot hold back a
- * CRITICAL reading for another patient on the same partition. The retry topic is consumed by the same listener after
- * a fixed delay; after the last attempt the record goes to {@code readings.ingested.dlq}. Malformed records go to the
- * DLQ without retries.
+ * Containers for the evaluator. Manual acks after the DB commit; cooperative-sticky assignment (a rebalance does not
+ * stop every partition).
  *
- * <p>Trade-off: a retried event leaves its patient's ordering. Episode folding does not depend on arrival order
- * (LEAST/GREATEST seen-times, severity only rises), so the alert ends up the same; only which change is announced
- * as RAISED versus SEVERITY_UPGRADED can differ.
+ * <ul>
+ *   <li>readings.ingested: batch listener, up to {@code batch-max-records} per poll; the broker holds a fetch up to
+ *       {@code batch-max-wait} until {@code batch-min-bytes} are there, so batches fill under load and a lone
+ *       CRITICAL on a quiet partition waits at most that long. Failing events are moved to the retry topic by the
+ *       listener (non-blocking retries are not available for batch listeners in spring-kafka, D29); an exception that
+ *       still escapes redelivers the whole poll with backoff and is never dead-lettered.</li>
+ *   <li>readings.ingested.retry: per record, fixed backoff, then readings.ingested.dlq. Malformed records go to the
+ *       DLQ at once. The backoff holds only the retry partition.</li>
+ *   <li>thresholds.changed: per pod, latest offset, no retries (cache eviction only).</li>
+ * </ul>
  */
 @Configuration
 @Profile("evaluator")
 class EvaluatorKafkaConfig {
 
-    private static final Logger log = LoggerFactory.getLogger(EvaluatorKafkaConfig.class);
-
     @Bean
-    ConcurrentKafkaListenerContainerFactory<String, String> evaluatorListenerFactory(
+    ConcurrentKafkaListenerContainerFactory<String, String> evaluatorBatchListenerFactory(
             KafkaProperties kafka, ObjectProvider<SslBundles> sslBundles, AlertingProperties props) {
-        Map<String, Object> consumer = kafka.buildConsumerProperties(sslBundles.getIfAvailable());
-        consumer.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        consumer.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        consumer.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        consumer.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        consumer.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, List.of(CooperativeStickyAssignor.class));
+        Map<String, Object> consumer = consumerProperties(kafka, sslBundles);
+        consumer.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, props.batchMaxRecords());
+        consumer.put(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG, (int) props.batchMaxWait().toMillis());
+        consumer.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, props.batchMinBytes());
 
-        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
-        factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(consumer));
-        factory.getContainerProperties().setAckMode(AckMode.MANUAL);
-        factory.setConcurrency(props.listenerConcurrency());
-        return factory;   // the retry-topic configurer installs the error handler that republishes failures
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = factory(consumer, props.listenerConcurrency());
+        factory.setBatchListener(true);
+        ExponentialBackOff backOff = new ExponentialBackOff(500, 2);
+        backOff.setMaxInterval(10_000);   // no max elapsed time: redeliver until the broker is back
+        factory.setCommonErrorHandler(new DefaultErrorHandler(backOff));
+        return factory;
     }
 
     @Bean
-    RetryTopicConfiguration readingsIngestedRetryTopic(KafkaTemplate<String, String> dlqTemplate,
-                                                       AlertingProperties props) {
-        return RetryTopicConfigurationBuilder.newInstance()
-                .includeTopic(KafkaTopics.READINGS_INGESTED)
-                .maxAttempts(props.maxRetries() + 1)
-                .fixedBackOff(props.retryInterval().toMillis())
-                .sameIntervalTopicReuseStrategy(SameIntervalTopicReuseStrategy.SINGLE_TOPIC)   // one .retry topic
-                .retryTopicSuffix(".retry")
-                .dltSuffix(".dlq")
-                .doNotAutoCreateRetryTopics()                      // TopicsConfig creates them with the main counts
-                .notRetryOn(List.of(JsonProcessingException.class, IllegalArgumentException.class))
-                .listenerFactory("evaluatorListenerFactory")
-                .dltHandlerMethod("evaluatorDeadLetters", "onDeadLetter")
-                .create(dlqTemplate);
-    }
-
-    /** Backoff on the retry topic pauses and resumes its partitions on this scheduler. */
-    @Bean
-    TaskScheduler retryTopicTaskScheduler() {
-        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
-        scheduler.setThreadNamePrefix("evaluator-retry-");
-        scheduler.setPoolSize(1);
-        return scheduler;
+    ConcurrentKafkaListenerContainerFactory<String, String> evaluatorRetryListenerFactory(
+            KafkaProperties kafka, ObjectProvider<SslBundles> sslBundles, AlertingProperties props,
+            EvaluatorDeadLetters deadLetters) {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory =
+                factory(consumerProperties(kafka, sslBundles), props.listenerConcurrency());
+        // First attempt on arrival, then maxRetries - 1 more: with the failed attempt on the main topic, every event
+        // gets 1 + maxRetries attempts before the DLQ, as before.
+        DefaultErrorHandler errors = new DefaultErrorHandler(deadLetters,
+                new FixedBackOff(props.retryInterval().toMillis(), Math.max(0, props.maxRetries() - 1)));
+        errors.addNotRetryableExceptions(JsonProcessingException.class, IllegalArgumentException.class);
+        factory.setCommonErrorHandler(errors);
+        return factory;
     }
 
     @Bean
-    EvaluatorDeadLetters evaluatorDeadLetters(MeterRegistry meters) {
-        return new EvaluatorDeadLetters(meters);
+    ConcurrentKafkaListenerContainerFactory<String, String> thresholdsListenerFactory(
+            KafkaProperties kafka, ObjectProvider<SslBundles> sslBundles) {
+        Map<String, Object> consumer = consumerProperties(kafka, sslBundles);
+        consumer.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = factory(consumer, 1);
+        factory.getContainerProperties().setAckMode(AckMode.RECORD);
+        return factory;
     }
 
-    /** DLQ producer: acks=all and idempotent, so a retried or dead-lettered record is not lost or doubled. */
+    @Bean
+    EvaluatorDeadLetters evaluatorDeadLetters(KafkaTemplate<String, String> dlqTemplate, MeterRegistry meters) {
+        // Same partition number: the DLQ and the retry topic have the main topic's partition count.
+        String dlq = KafkaTopics.dlq(KafkaTopics.READINGS_INGESTED);
+        return new EvaluatorDeadLetters(new DeadLetterPublishingRecoverer(dlqTemplate,
+                (record, e) -> new TopicPartition(dlq, record.partition())), meters);
+    }
+
+    /** Retry-topic and DLQ producer: acks=all and idempotent, so a moved record is not lost or doubled. */
     @Bean
     KafkaTemplate<String, String> dlqTemplate(KafkaProperties kafka, ObjectProvider<SslBundles> sslBundles) {
         Map<String, Object> producer = kafka.buildProducerProperties(sslBundles.getIfAvailable());
@@ -113,36 +110,22 @@ class EvaluatorKafkaConfig {
         return new KafkaTemplate<>(new DefaultKafkaProducerFactory<>(producer));
     }
 
-    /** Sees each record that reached the DLQ: counts it and logs coordinates only (payloads hold reading values). */
-    static class EvaluatorDeadLetters {
+    private static Map<String, Object> consumerProperties(KafkaProperties kafka, ObjectProvider<SslBundles> ssl) {
+        Map<String, Object> consumer = kafka.buildConsumerProperties(ssl.getIfAvailable());
+        consumer.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        consumer.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        consumer.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        consumer.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        consumer.put(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG, List.of(CooperativeStickyAssignor.class));
+        return consumer;
+    }
 
-        private final Counter deadLettered;
-
-        EvaluatorDeadLetters(MeterRegistry meters) {
-            this.deadLettered = Counter.builder("vitallink.evaluator.dlq")
-                    .description("readings.ingested records that reached the DLQ").register(meters);
-        }
-
-        public void onDeadLetter(ConsumerRecord<String, String> record) {
-            deadLettered.increment();
-            log.warn("Dead-lettered topic={} partition={} offset={} error={}", record.topic(), record.partition(),
-                    record.offset(), exceptionClass(record));
-        }
-
-        /** Root-cause class name from the recoverer's headers (kafka_dlt-... or kafka_... depending on the path). */
-        static String exceptionClass(ConsumerRecord<String, String> record) {
-            for (String suffix : List.of("exception-cause-fqcn", "exception-fqcn")) {
-                Header found = null;
-                for (Header h : record.headers()) {
-                    if (h.key().endsWith(suffix)) {
-                        found = h;
-                    }
-                }
-                if (found != null && found.value() != null) {
-                    return new String(found.value(), StandardCharsets.UTF_8);
-                }
-            }
-            return "unknown";
-        }
+    private static ConcurrentKafkaListenerContainerFactory<String, String> factory(Map<String, Object> consumer,
+                                                                                  int concurrency) {
+        ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(new DefaultKafkaConsumerFactory<>(consumer));
+        factory.getContainerProperties().setAckMode(AckMode.MANUAL);
+        factory.setConcurrency(concurrency);
+        return factory;
     }
 }
