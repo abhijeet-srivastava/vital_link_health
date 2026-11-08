@@ -429,6 +429,13 @@ CREATE INDEX ix_audit_patient ON audit_log (patient_id, at);
 | 24 | Every repeat breach rewrote the alert row and its indexes | Index churn and vacuum load at thousands of updates per second | fillfactor = 80; repeat breaches change only unindexed columns, so updates stay HOT |
 | 25 | One topic for all alert severities | CRITICAL alerts queue behind HIGH and MEDIUM during a spike | outbox\_event.topic chosen at write time; alerts.raised.critical with its own notifier group |
 | 26 | No way to hold back non-critical alert volume | A 20% breach rate floods coaches | confirm\_n / confirm\_window on threshold\_rule (never for CRITICAL), notification\_policy with a DIGEST channel |
+| 27 | `alert_occurrence.severity` and `notification.severity` had no CHECK | A typo such as 'LOW' or 'high' is stored silently; the queue and the message show a severity that does not exist | `CHECK (severity IN ('CRITICAL','HIGH','MEDIUM'))` on both tables |
+| 28 | `ix_alert_queue` had no tie-breaker column | Alerts with the same severity and created\_at page unstably: rows skipped or repeated between queue pages, plus an extra sort per page | `alert_id` added as the last index column; queue cursor = `(severity_rank, created_at, alert_id)`. alert\_id never changes, so repeat-breach updates stay HOT |
+| 29 | `care_assignment` had no no-overlap constraint, unlike device\_binding | Two primary coaches at once: alerts routed to the wrong coach, panel access granted to both | `EXCLUDE` on (patient\_id, role, validity range) plus `CHECK (valid_to > valid_from)`: one PRIMARY and one BACKUP per patient at any moment; the projection consumer closes the old row before inserting the new one |
+| 30 | `measure.reading_type` tied each measure to one reading type; PULSE belonged only to blood pressure | A pulse oximeter's pulse value had no measure, so it was never evaluated or alerted on | `reading_type_measure` maps each reading type to its measures and source column; PULSE comes from BP cuffs and oximeters and shares one episode and its thresholds (clinical sign-off needed) |
+| 31 | Seeded threshold bands are illustrative, not clinically approved | Demo values could reach production and drive real alerts | Seed rows use `created_by = 'SEED-NOT-CLINICAL'`; the prod profile refuses to start if any exist; real bands need clinical sign-off |
+
+Gaps 27–31 were found while applying the schema in stage 2 and are fixed by migration `V202611080900__schema_fixes_after_stage2.sql`; the schema listing above shows the stage 2 starting point.
 
 ### Interfaces (Java)
 
