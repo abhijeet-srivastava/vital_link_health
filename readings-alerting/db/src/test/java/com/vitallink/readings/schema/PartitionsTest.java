@@ -38,15 +38,20 @@ class PartitionsTest extends IntegrationTestBase {
 
     @Test
     void service_role_can_run_partition_maintenance_and_it_is_idempotent() throws SQLException {
-        List<String> before = partitionsOf("reading");
+        List<String> created = partitionsOf("reading");
 
         try (Connection c = dataSource().getConnection(); Statement st = c.createStatement()) {
             st.execute("SET ROLE vitallink_service");
-            assertThat(nonEmptyDefaults(st)).isEmpty();
-            assertThat(nonEmptyDefaults(st)).isEmpty();
-        }
 
-        assertThat(partitionsOf("reading")).containsExactlyInAnyOrderElementsOf(before);
+            // pg_partman counts premade days from now(), not midnight: after 12:00 UTC the first run tops up one day.
+            assertThat(nonEmptyDefaults(st)).isEmpty();
+            List<String> afterFirstRun = partitionsOf("reading");
+            assertThat(afterFirstRun).containsAll(created);
+            assertThat(afterFirstRun).hasSizeLessThanOrEqualTo(created.size() + 1);
+
+            assertThat(nonEmptyDefaults(st)).isEmpty();
+            assertThat(partitionsOf("reading")).containsExactlyInAnyOrderElementsOf(afterFirstRun);
+        }
     }
 
     @Test
