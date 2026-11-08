@@ -3,6 +3,8 @@
 #   scripts/demo.sh ingest   same BP batch posted twice -> ACCEPTED, then DUPLICATE; one reading row
 #   scripts/demo.sh relay    ingest, then the relay publishes one readings.ingested record (key = patient_id,
 #                            event_id header) and deletes its outbox row
+#   scripts/demo.sh critical systolic 186 -> one CRITICAL alert with escalate_at; the same readings.ingested record
+#                            replayed to Kafka -> still one alert, occurrence_cnt = 1
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -81,8 +83,60 @@ relay() {
   echo "count: $(printf '%s' "$records" | grep -c "$READING_ID" || true)"
 }
 
+alert_for_reading() {
+  psql_value "SELECT a.alert_id, a.severity, a.status, a.escalate_at IS NOT NULL AS escalate_at_set, a.occurrence_cnt
+              FROM alert a JOIN alert_occurrence o USING (alert_id)
+              WHERE o.reading_uuid = '$READING_ID' AND o.measure_code = 1"
+}
+
+wait_evaluator_caught_up() {
+  local deadline=$((SECONDS + 30))
+  until docker compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+      --describe --group alert-evaluator 2>/dev/null \
+      | awk '$2 == "readings.ingested" && $6 != "0" && $6 != "-" { lag = 1 } END { exit lag }'; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "alert-evaluator still lagging after 30s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+}
+
+critical() {
+  local deadline record
+  # Demo reset: resolve the patient's open SYSTOLIC episode (e.g. from 'ingest'), so this run opens a fresh one.
+  psql_value "UPDATE alert SET status = 'RESOLVED', resolved_at = now(), escalate_at = NULL, version = version + 1,
+              resolution_note = 'demo reset'
+              WHERE patient_id = $PATIENT_ID AND measure_code = 1 AND status <> 'RESOLVED'" > /dev/null
+  relay
+  echo "== waiting for the evaluator to open the alert"
+  deadline=$((SECONDS + 30))
+  until [ -n "$(alert_for_reading)" ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "no alert after 30s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "== alert_id|severity|status|escalate_at_set|occurrence_cnt (expect CRITICAL|OPEN|t|1)"
+  alert_for_reading
+  echo "== replaying the same readings.ingested record (same event_id, same readings)"
+  record=$(docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+    --topic readings.ingested --from-beginning --timeout-ms 10000 \
+    --property print.key=true --property print.headers=true 2>/dev/null | grep "$READING_ID" | head -1)
+  printf '%s\n' "$record" | docker compose exec -T kafka /opt/kafka/bin/kafka-console-producer.sh \
+    --bootstrap-server localhost:9092 --topic readings.ingested \
+    --property parse.key=true --property parse.headers=true
+  wait_evaluator_caught_up
+  echo "== after replay (expect the same row, occurrence_cnt still 1)"
+  alert_for_reading
+  echo "== alerts for patient $PATIENT_ID SYSTOLIC not resolved (expect 1)"
+  psql_value "SELECT count(*) FROM alert WHERE patient_id = $PATIENT_ID AND measure_code = 1 AND status <> 'RESOLVED'"
+}
+
 case "${1:-}" in
   ingest) ingest ;;
   relay) relay ;;
-  *) echo "usage: $0 ingest|relay" >&2; exit 2 ;;
+  critical) critical ;;
+  *) echo "usage: $0 ingest|relay|critical" >&2; exit 2 ;;
 esac

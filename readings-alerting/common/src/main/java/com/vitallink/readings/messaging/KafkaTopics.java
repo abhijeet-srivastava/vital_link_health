@@ -1,11 +1,13 @@
 package com.vitallink.readings.messaging;
 
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
  * Topics and partition counts from references/architecture.md. Counts are fixed up front: adding partitions later
- * remaps keys and breaks per-patient ordering. Each topic has a {@code .dlq} with the same count.
+ * remaps keys and breaks per-patient ordering. Each topic has a {@code .dlq} with the same count; topics whose
+ * consumer retries without blocking its partition also have a {@code .retry} with the same count.
  */
 public final class KafkaTopics {
 
@@ -27,6 +29,9 @@ public final class KafkaTopics {
             new TopicSpec(THRESHOLDS_CHANGED, 8),
             new TopicSpec(DEVICE_BINDING_CHANGED, 8));
 
+    /** Consumers that retry through {@code <topic>.retry} (non-blocking): the evaluator. */
+    private static final Set<String> WITH_RETRY_TOPIC = Set.of(READINGS_INGESTED);
+
     private KafkaTopics() {
     }
 
@@ -34,10 +39,18 @@ public final class KafkaTopics {
         return topic + ".dlq";
     }
 
-    /** Every topic and its DLQ. */
+    public static String retry(String topic) {
+        return topic + ".retry";
+    }
+
+    /** Every topic, its DLQ and, where the consumer retries without blocking, its retry topic. */
     public static List<TopicSpec> all() {
         return MAIN.stream()
-                .flatMap(t -> Stream.of(t, new TopicSpec(dlq(t.name()), t.partitions())))
+                .flatMap(t -> Stream.concat(
+                        Stream.of(t, new TopicSpec(dlq(t.name()), t.partitions())),
+                        WITH_RETRY_TOPIC.contains(t.name())
+                                ? Stream.of(new TopicSpec(retry(t.name()), t.partitions()))
+                                : Stream.empty()))
                 .toList();
     }
 }

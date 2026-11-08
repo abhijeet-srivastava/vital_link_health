@@ -53,6 +53,7 @@ pagination only, always scoped by patient (and coach panel for coaches).
 | `alert.state_changed` | `patient_id` | 32 | alerting outbox | notifier (escalation, reassignment), audit export |
 | `thresholds.changed` | `patient_id` | 8 | threshold API outbox | all pods (cache eviction) |
 | `device.binding_changed` | `device_id` | 8 | device admin outbox | ingest pods (cache eviction) |
+| `readings.ingested.retry` | `patient_id` | 128 | alert-evaluator on failure (non-blocking retry) | alert-evaluator (group `alert-evaluator.retry`), after a fixed delay |
 | `<topic>.dlq` | same | same | consumers after N retries | ops tooling |
 
 Partition counts are set up front: adding partitions later remaps keys and breaks per-patient
@@ -72,6 +73,8 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
   "alert_id": 99102, "patient_id": 8812, "coach_id": 41, "measure": "SYSTOLIC",
   "observed_value": 186, "severity": "CRITICAL", "reason": "RAISED", "threshold_id": 7,
   "occurrence_cnt": 1, "is_late": false }
+// reason RAISED (new episode) or SEVERITY_UPGRADED (same alert_id, severity raised in place); severity CRITICAL ->
+// topic alerts.raised.critical, otherwise alerts.raised. Repeat breaches at the same or lower severity emit nothing.
 
 { "event_id": "...", "type": "alert.state_changed", "alert_id": 99102,
   "from": "OPEN", "to": "ESCALATED", "actor": "scheduler", "alert_version": 3 }

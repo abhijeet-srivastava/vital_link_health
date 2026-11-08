@@ -1,5 +1,12 @@
 package com.vitallink.readings.domain;
 
-// Placeholder referenced by ports/; fields are defined in stage 5.
-public record BreachWithReading() {
+import java.time.Instant;
+import java.util.UUID;
+
+/** A breach and the reading it came from; (deviceId, readingUuid, measure, measuredAt) is the alert_occurrence PK. */
+public record BreachWithReading(long patientId, long deviceId, UUID readingUuid, Instant measuredAt, Breach breach) {
+
+    public Measure measure() {
+        return breach.measure();
+    }
 }

@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -55,7 +56,9 @@ class RelayTopicsTest extends SpringIntegrationTestBase {
 
         Map<String, Integer> actual;
         try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBootstrap()))) {
-            List<String> names = expected.keySet().stream().flatMap(t -> List.of(t, t + ".dlq").stream()).toList();
+            List<String> names = Stream.concat(
+                    expected.keySet().stream().flatMap(t -> List.of(t, t + ".dlq").stream()),
+                    Stream.of("readings.ingested.retry")).toList();
             actual = admin.describeTopics(names).allTopicNames().get().values().stream()
                     .collect(Collectors.toMap(TopicDescription::name, d -> d.partitions().size()));
         }
@@ -64,6 +67,7 @@ class RelayTopicsTest extends SpringIntegrationTestBase {
             assertThat(actual).containsEntry(topic, partitions);
             assertThat(actual).containsEntry(topic + ".dlq", partitions);
         });
+        assertThat(actual).as("evaluator's non-blocking retry topic").containsEntry("readings.ingested.retry", 128);
     }
 
     @Test

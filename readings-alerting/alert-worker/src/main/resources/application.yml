@@ -15,6 +15,12 @@ spring:
     bootstrap-servers: ${VITALLINK_KAFKA_BOOTSTRAP}
     admin:
       fail-fast: true   # topics are created on startup (TopicsConfig); broker auto-create is off
+  data:
+    redis:                    # threshold cache L2 (evaluator profile); fail-open, so keep timeouts short
+      host: ${VITALLINK_REDIS_HOST}
+      port: ${VITALLINK_REDIS_PORT:6379}
+      timeout: 250ms
+      connect-timeout: 250ms
 
 vitallink:
   kafka:
@@ -23,12 +29,25 @@ vitallink:
     poll-interval: PT0.1S
     ack-timeout: PT30S
     max-backoff: PT5S
+  alerting:                 # evaluator profile only
+    reopen-on-critical: true            # open clinical decision: ACKNOWLEDGED + rise to CRITICAL -> OPEN
+    multi-program-policy: MOST_CONSERVATIVE   # open clinical decision; FIRST_ENROLLED is the alternative
+    escalation-window: PT15M
+    late-after: P7D
+    threshold-cache-ttl: PT10M
+    threshold-cache-size: 200000
+    max-retries: 3                      # on readings.ingested.retry (non-blocking), then readings.ingested.dlq
+    retry-interval: PT5S
+    listener-concurrency: 4
 
 server:
   port: 8082
   shutdown: graceful
 
 management:
+  health:
+    redis:
+      enabled: false   # Redis is a cache tier only; its loss must not mark the worker unhealthy
   endpoints:
     web:
       exposure:
