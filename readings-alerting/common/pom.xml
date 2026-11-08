@@ -30,6 +30,11 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
+        <!-- alerts/: state-change services serialize their outbox payloads. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
         <!-- messaging/OutboxRelay: plain Kafka producer inside a Spring-managed JDBC transaction. -->
         <dependency>
             <groupId>org.springframework</groupId>

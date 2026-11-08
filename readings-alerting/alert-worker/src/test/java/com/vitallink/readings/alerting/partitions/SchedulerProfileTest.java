@@ -23,4 +23,11 @@ class SchedulerProfileTest extends SpringIntegrationTestBase {
                 .extracting(task -> task.getTask().getRunnable().toString())
                 .anyMatch(name -> name.contains("PartitionMaintenanceJob.run"));
     }
+
+    @Test
+    void scheduler_profile_schedules_escalation_without_the_evaluator() {
+        assertThat(scheduledTasks.getScheduledTasks())
+                .extracting(task -> task.getTask().getRunnable().toString())
+                .anyMatch(name -> name.contains("EscalationJob.run"));
+    }
 }

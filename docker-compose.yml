@@ -145,7 +145,7 @@ services:
     image: vitallink/alert-worker:dev
     environment:
       <<: *app-env
-      # scheduler: partition maintenance (escalation joins in stage 6); relay: local outbox relay, keep 1 replica;
+      # scheduler: partition maintenance + escalation (safe on several replicas); relay: local outbox relay, keep 1 replica;
       # evaluator: readings.ingested -> alert episodes (scales with partitions)
       SPRING_PROFILES_ACTIVE: scheduler,relay,evaluator
     ports:

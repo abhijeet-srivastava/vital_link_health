@@ -76,8 +76,12 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 // reason RAISED (new episode) or SEVERITY_UPGRADED (same alert_id, severity raised in place); severity CRITICAL ->
 // topic alerts.raised.critical, otherwise alerts.raised. Repeat breaches at the same or lower severity emit nothing.
 
-{ "event_id": "...", "type": "alert.state_changed", "alert_id": 99102,
-  "from": "OPEN", "to": "ESCALATED", "actor": "scheduler", "alert_version": 3 }
+{ "event_id": "...", "type": "alert.state_changed", "schema_version": 1,
+  "alert_id": 99102, "patient_id": 8812, "coach_id": 41, "measure": "SYSTOLIC", "severity": "CRITICAL",
+  "from": "OPEN", "to": "ESCALATED", "reason": "ESCALATED",
+  "actor_type": "SERVICE", "actor_id": "escalation-scheduler", "alert_version": 3 }
+// reason ACKNOWLEDGED | RESOLVED | ESCALATED | REASSIGNED (from = to; adds "previous_coach_id"). actor_type COACH
+// carries the coach id as actor_id. Never the resolution note. Topic alert.state_changed, key patient_id.
 ```
 
 ## Caching (Redis + in-process Caffeine L1)

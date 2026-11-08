@@ -41,16 +41,6 @@ import io.micrometer.core.instrument.MeterRegistry;
 class EvaluatorConfig {
 
     @Bean
-    Clock clock() {
-        return Clock.systemUTC();
-    }
-
-    @Bean
-    UuidV7 uuidV7(Clock clock) {
-        return new UuidV7(clock);
-    }
-
-    @Bean
     AlertDecisions alertDecisions(Clock clock, AlertingProperties props) {
         return new AlertDecisions(clock, props.reopenOnCritical(), props.escalationWindow(), props.lateAfter());
     }

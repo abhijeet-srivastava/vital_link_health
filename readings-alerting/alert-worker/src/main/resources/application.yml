@@ -43,6 +43,9 @@ vitallink:
     batch-max-wait: PT0.2S              # ... or 200 ms, whichever comes first
     batch-min-bytes: 65536              # ~100+ events; below this the broker waits up to batch-max-wait
     send-timeout: PT10S
+  escalation:               # scheduler profile only; the window is alerting.escalation-window (applied at raise)
+    poll-interval: PT5S                 # worst case an alert escalates this long after escalate_at
+    batch-size: 100                     # alerts claimed per transaction (SKIP LOCKED); a tick drains full batches
 
 server:
   port: 8082
