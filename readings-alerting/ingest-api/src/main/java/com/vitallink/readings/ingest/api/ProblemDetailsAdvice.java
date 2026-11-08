@@ -1,6 +1,7 @@
 package com.vitallink.readings.ingest.api;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Locale;
 
 import org.slf4j.Logger;
@@ -22,6 +23,8 @@ import com.vitallink.readings.domain.BatchTooLargeException;
 import com.vitallink.readings.domain.DeviceMismatchException;
 import com.vitallink.readings.domain.MalformedBatchException;
 import com.vitallink.readings.domain.UnauthenticatedException;
+import com.vitallink.readings.ingest.backpressure.OverloadedException;
+import com.vitallink.readings.ingest.backpressure.RateLimitedException;
 
 /**
  * RFC 7807 problem+json for every error, with a stable {@code type} URI and a machine-readable {@code code}.
@@ -46,6 +49,18 @@ public class ProblemDetailsAdvice extends ResponseEntityExceptionHandler {
     @ExceptionHandler(BatchTooLargeException.class)
     ResponseEntity<Object> batchTooLarge(BatchTooLargeException e) {
         return problem(HttpStatus.PAYLOAD_TOO_LARGE, "BATCH_TOO_LARGE", e.getMessage());
+    }
+
+    @ExceptionHandler(RateLimitedException.class)
+    ResponseEntity<Object> rateLimited(RateLimitedException e) {
+        return withRetryAfter(problem(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", e.getMessage()), e.retryAfter());
+    }
+
+    @ExceptionHandler(OverloadedException.class)
+    ResponseEntity<Object> overloaded(OverloadedException e) {
+        ResponseEntity<Object> response = problem(HttpStatus.SERVICE_UNAVAILABLE, "OVERLOADED", e.getMessage());
+        ((ProblemDetail) response.getBody()).setProperty("reason", e.reason().name());
+        return withRetryAfter(response, e.retryAfter());
     }
 
     @ExceptionHandler(MalformedBatchException.class)
@@ -74,6 +89,13 @@ public class ProblemDetailsAdvice extends ResponseEntityExceptionHandler {
         log.error("Unhandled ingest error type={} at={}", e.getClass().getName(),
                 e.getStackTrace().length > 0 ? e.getStackTrace()[0] : "?");
         return problem(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Unexpected error");
+    }
+
+    private static ResponseEntity<Object> withRetryAfter(ResponseEntity<Object> response, Duration retryAfter) {
+        return ResponseEntity.status(response.getStatusCode())
+                .headers(response.getHeaders())
+                .header(HttpHeaders.RETRY_AFTER, Long.toString(retryAfter.toSeconds()))
+                .body(response.getBody());
     }
 
     static ResponseEntity<Object> problem(HttpStatus status, String code, String detail) {

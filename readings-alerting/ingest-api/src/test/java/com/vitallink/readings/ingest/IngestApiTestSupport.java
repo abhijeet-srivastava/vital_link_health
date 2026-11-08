@@ -50,7 +50,7 @@ abstract class IngestApiTestSupport extends SpringIntegrationTestBase {
     record Binding(long patientId, Instant from, Instant to) {
     }
 
-    record Response(int status, String contentType, JsonNode body) {
+    record Response(int status, String contentType, JsonNode body, String retryAfter) {
         List<String> statuses() {
             List<String> statuses = new ArrayList<>();
             body.path("results").forEach(r -> statuses.add(r.path("status").asText()));
@@ -131,7 +131,8 @@ abstract class IngestApiTestSupport extends SpringIntegrationTestBase {
         HttpResponse<String> response = HTTP.send(request.build(), HttpResponse.BodyHandlers.ofString());
         String text = response.body();
         JsonNode json = text == null || text.isBlank() ? JSON.createObjectNode() : JSON.readTree(text);
-        return new Response(response.statusCode(), response.headers().firstValue("Content-Type").orElse(""), json);
+        return new Response(response.statusCode(), response.headers().firstValue("Content-Type").orElse(""), json,
+                response.headers().firstValue("Retry-After").orElse(null));
     }
 
     long count(String sql, Object... params) {

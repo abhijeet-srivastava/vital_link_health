@@ -29,6 +29,15 @@ vitallink:
     # Blank disables; such readings then land in reading_default (alarmed).
     reject-older-than: ${VITALLINK_INGEST_REJECT_OLDER_THAN:P90D}
     latest-ttl: P30D
+    backpressure:              # 503 + jittered Retry-After when overloaded; 429 per device (Redis, fails open)
+      max-in-flight: 64        # per pod; above the Hikari pool (10) so short waits queue, sustained overload sheds
+      max-outbox-age: PT60S    # oldest unpublished event older than this: relay or Kafka is down
+      max-outbox-rows: 100000
+      outbox-sample-interval: PT2S
+      retry-after-min: PT5S
+      retry-after-max: PT30S
+      device-burst: 30         # a device normally sends a few batches of up to 500 readings
+      device-requests-per-minute: 60
 
 server:
   port: 8081

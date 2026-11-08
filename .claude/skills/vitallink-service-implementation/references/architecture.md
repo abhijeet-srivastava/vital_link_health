@@ -84,6 +84,7 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 | `latest:{patientId}:{readingType}` | Latest reading | After commit, Lua compare-and-set on `measured_at` | Never overwritten by older; TTL 7 days |
 | `thr:{patientId}:{measureCode}` | Effective threshold bands | Cache-aside, TTL 10 min (jittered) | `DEL` on change + `thresholds.changed` evicts L1 |
 | `dev:{keyId}` | Device id, current binding | Cache-aside, TTL 5 min | Evicted on rotation, revocation, rebinding |
+| `rate:{deviceId}` | Per-device token bucket (tokens, last refill) | Lua script per ingest request, Redis clock | Expiry once full; on Redis loss, no rate limit (fail open) |
 | `idem:{deviceId}:{readingUuid}` | Seen marker | `SET NX`, TTL 24 h | Expiry only; DB key is the guarantee |
 | `confirm:{patientId}:{measureCode}` | Recent breach timestamps (confirmation rule) | Sorted set, trimmed to window | Expiry; on Redis loss, alert immediately |
 | `summary:{patientId}` | AI summary | Cache-aside, TTL 15 min | Evicted on new alert |

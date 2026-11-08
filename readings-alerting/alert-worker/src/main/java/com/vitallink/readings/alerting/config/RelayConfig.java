@@ -16,6 +16,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.vitallink.readings.alerting.relay.OutboxRelayRunner;
 import com.vitallink.readings.messaging.OutboxRelay;
+import com.vitallink.readings.persistence.JdbcOutboxBacklog;
 
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -51,20 +52,22 @@ class RelayConfig {
     }
 
     @Bean
-    Gauge outboxBacklogGauge(MeterRegistry meters, JdbcClient jdbc) {
-        return Gauge.builder("vitallink.outbox.backlog", () -> jdbc.sql(
-                                "SELECT count(*) FROM (SELECT 1 FROM outbox_event LIMIT " + BACKLOG_COUNT_CAP + ") b")
-                        .query(Long.class).single())
+    JdbcOutboxBacklog outboxBacklog(JdbcClient jdbc) {
+        return new JdbcOutboxBacklog(jdbc);
+    }
+
+    @Bean
+    Gauge outboxBacklogGauge(MeterRegistry meters, JdbcOutboxBacklog backlog) {
+        return Gauge.builder("vitallink.outbox.backlog", () -> Math.min(BACKLOG_COUNT_CAP,
+                        backlog.sample(BACKLOG_COUNT_CAP).rows()))
                 .description("Unpublished outbox rows (capped at " + BACKLOG_COUNT_CAP + ")")
                 .register(meters);
     }
 
     @Bean
-    Gauge outboxOldestAgeGauge(MeterRegistry meters, JdbcClient jdbc) {
-        return Gauge.builder("vitallink.outbox.oldest.age", () -> jdbc.sql("""
-                                SELECT coalesce(extract(epoch FROM now() - min(created_at)), 0) FROM outbox_event
-                                """)
-                        .query(Double.class).single())
+    Gauge outboxOldestAgeGauge(MeterRegistry meters, JdbcOutboxBacklog backlog) {
+        return Gauge.builder("vitallink.outbox.oldest.age",
+                        () -> backlog.sample(BACKLOG_COUNT_CAP).oldestAge().toMillis() / 1000.0)
                 .description("Age of the oldest unpublished outbox row")
                 .baseUnit("seconds")
                 .register(meters);

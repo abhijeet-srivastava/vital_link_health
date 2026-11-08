@@ -35,6 +35,20 @@ docker/                       postgres (16 + pg_partman) and app images
 docker-compose.yml
 ```
 
+## Backpressure
+
+ingest-api sheds load before reading the body or touching the database (`vitallink.ingest.backpressure.*`):
+
+- `429 RATE_LIMITED` + `Retry-After`: per-device token bucket in Redis (`device-burst`, `device-requests-per-minute`).
+  If Redis is down the limiter lets requests through; Redis is never required for correctness.
+- `503 OVERLOADED` + jittered `Retry-After` (`retry-after-min`..`max`), `reason`:
+  - `IN_FLIGHT`: `max-in-flight` requests already running on this pod;
+  - `OUTBOX_BACKLOG`: the outbox has more than `max-outbox-rows` rows or its oldest row is older than
+    `max-outbox-age` (relay or Kafka down), sampled every `outbox-sample-interval`.
+
+Devices buffer and retry, so shedding loses nothing. With the relay stopped, ingest starts returning `503` about
+`max-outbox-age` (60 s) later.
+
 ## Outbox relay
 
 Ingest writes a `readings.ingested` row to `outbox_event` in the same transaction as the readings; nothing on the
