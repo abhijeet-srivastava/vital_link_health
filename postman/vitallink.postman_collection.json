@@ -784,6 +784,129 @@
       ]
     },
     {
+      "name": "AI summary (coach)",
+      "description": "GET /v1/patients/{patientId}/summary: advisory plain-language summary of the last 24 h, built only from reading_rollup (no ids, dates or free text in the prompt). The LLM is a deterministic stub (VITALLINK_LLM_STUB_MODE=ok|timeout|error). Always 200 for an allowed caller: source llm, or source rules when the LLM times out (2 s), errors, or the circuit/budget is open. Only llm answers are cached in summary:{patientId} for 15 min, evicted on alerts.raised[.critical]. Audited READ_SUMMARY.",
+      "item": [
+        {
+          "name": "Patient summary (llm, or rules fallback)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/summary",
+            "description": "Needs readings:read and the patient on the coach's panel. With stub mode ok expect source llm; with timeout or error expect source rules after at most ~2 s."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 advisory summary from llm or rules', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.patientId).to.eql(Number(pm.environment.get('patient_id')));",
+                  "    pm.expect(['llm', 'rules']).to.include(b.source);",
+                  "    pm.expect(b.advisory).to.eql(true);",
+                  "    pm.expect(b.label).to.include('Advisory only');",
+                  "    pm.expect(b.text).to.be.a('string').and.not.empty;",
+                  "    pm.expect(b.windowHours).to.eql(24);",
+                  "    pm.collectionVariables.set('summary_source', b.source);",
+                  "    pm.collectionVariables.set('summary_generated_at', b.generatedAt);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Summary again (llm answer served from cache)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/summary",
+            "description": "An llm summary comes from summary:{patientId} (same generatedAt) until the 15 min TTL or a new alert evicts it. A rules fallback is never cached, so it is regenerated."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('llm summary is cached; rules is regenerated', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const b = pm.response.json();",
+                  "    if (pm.collectionVariables.get('summary_source') === 'llm' && b.source === 'llm') {",
+                  "        pm.expect(b.generatedAt).to.eql(pm.collectionVariables.get('summary_generated_at'));",
+                  "    } else {",
+                  "        pm.expect(['llm', 'rules']).to.include(b.source);",
+                  "    }",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patient outside the coach's panel -> 403 (audited DENIED)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{outside_patient_id}}/summary"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "No token -> 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/summary"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 without a bearer token', () => {",
+                  "    pm.response.to.have.status(401);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "Access control",
       "item": [
         {
@@ -1288,6 +1411,14 @@
     },
     {
       "key": "alert_severity",
+      "value": ""
+    },
+    {
+      "key": "summary_source",
+      "value": ""
+    },
+    {
+      "key": "summary_generated_at",
       "value": ""
     }
   ]

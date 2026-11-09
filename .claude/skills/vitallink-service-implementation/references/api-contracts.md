@@ -33,6 +33,10 @@ outside the coach policy; not wired yet).
 | `PUT /v1/patients/{patientId}/notification-policy` | Clinician | `IMMEDIATE` or `DAILY_DIGEST` for non-critical | `200` |
 | `POST /internal/v1/care-assignments` | Service | Make `coach_id` the patient's PRIMARY; unresolved alerts move to it | `200` + `moved_alerts` |
 
+Queue items carry `escalateAt`, the escalation *deadline*: set only while the alert is `OPEN` and `CRITICAL`,
+and `null` once it is acknowledged, escalated or resolved (schema CHECK on `escalate_at`). An `ESCALATED` alert
+therefore shows `escalateAt: null`; the time it escalated is the `audit_log` row with action `ESCALATE_ALERT`.
+
 ## Ingest
 
 Request (a single reading is a batch of one):
