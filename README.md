@@ -23,6 +23,41 @@ docker compose ps                  # everything healthy, flyway exited 0
 
 Kafka is reachable from the host on `localhost:9094`, Postgres on `5432` and Redis on `6379`, all bound to 127.0.0.1.
 
+## Dev bearer tokens
+
+query-api validates HS256 JWTs signed with `VITALLINK_DEV_JWT_SECRET` (the same value compose injects from `.env`).
+`scripts/mint-dev-token.sh` mints one locally, no running app needed:
+
+```sh
+scripts/mint-dev-token.sh <sub> [COACH|CLINICIAN|SERVICE] [scopes] [ttl-seconds]
+```
+
+- `sub` — numeric coach id for `COACH`, free-form id otherwise
+- actor — defaults to `COACH`
+- scopes — space-delimited, defaults to `"readings:read alerts:read alerts:write"`
+- ttl-seconds — defaults to `3600`
+
+Examples:
+
+```sh
+# Coach viewing/acking alerts
+scripts/mint-dev-token.sh 2 COACH "readings:read alerts:read alerts:write"
+
+# Clinician setting alert thresholds
+scripts/mint-dev-token.sh dr-7 CLINICIAN thresholds:write
+
+# Service-to-service call, e.g. internal care-assignment sync
+scripts/mint-dev-token.sh care-team-sync SERVICE assignments:write
+
+# Use directly in a request
+curl --location 'http://localhost:8083/internal/v1/care-assignments' \
+  --header "Authorization: Bearer $(scripts/mint-dev-token.sh care-team-sync SERVICE assignments:write)" \
+  --header 'Content-Type: application/json' \
+  --data '{"patient_id": 2, "coach_id": 2}'
+```
+
+Never used in production — real tokens come from the OIDC issuer there.
+
 ## Layout
 
 ```
