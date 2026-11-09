@@ -18,4 +18,9 @@ public final class CacheKeys {
     public static String thresholds(long patientId, Measure measure) {
         return "thr:" + patientId + ":" + measure.code();
     }
+
+    /** AI summary per patient: query-api writes it (15 min) and evicts it when an alert is raised for the patient. */
+    public static String summary(long patientId) {
+        return "summary:" + patientId;
+    }
 }

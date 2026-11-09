@@ -56,8 +56,8 @@ and backfills Redis through the same compare-and-set ingest uses.
 | Topic | Key | Partitions | Producer | Consumers |
 | --- | --- | --- | --- | --- |
 | `readings.ingested` | `patient_id` | 128 | ingest outbox | evaluator |
-| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier (group `notifier`), AI triage |
-| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group (`notifier-critical`) |
+| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier (group `notifier`), AI triage, summary cache eviction (query-api, group `query-summary-eviction`) |
+| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group (`notifier-critical`), summary cache eviction (query-api, group `query-summary-eviction`) |
 | `alert.state_changed` | `patient_id` | 32 | alerting outbox | critical notifier group (`notifier-critical`, own container: escalation, reassignment), audit export |
 | `thresholds.changed` | `patient_id` | 8 | threshold API outbox | all pods (cache eviction) |
 | `device.binding_changed` | `device_id` | 8 | device admin outbox | ingest pods (cache eviction) |
@@ -107,7 +107,7 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 | `rate:{deviceId}` | Per-device token bucket (tokens, last refill) | Lua script per ingest request, Redis clock | Expiry once full; on Redis loss, no rate limit (fail open) |
 | `idem:{deviceId}:{readingUuid}` | Seen marker | `SET NX`, TTL 24 h | Expiry only; DB key is the guarantee |
 | `confirm:{patientId}:{measureCode}` | Recent breach timestamps (confirmation rule) | Sorted set, trimmed to window | Expiry; on Redis loss, alert immediately |
-| `summary:{patientId}` | AI summary | Cache-aside, TTL 15 min | Evicted on new alert |
+| `summary:{patientId}` | AI summary (LLM answers only; rule-based fallbacks are not cached) | Cache-aside, TTL 15 min | Evicted on `alerts.raised` and `alerts.raised.critical` |
 
 Redis is never required for correctness: every miss or outage falls back to the database.
 

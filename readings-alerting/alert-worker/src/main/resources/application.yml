@@ -46,6 +46,9 @@ vitallink:
   escalation:               # scheduler profile only; the window is alerting.escalation-window (applied at raise)
     poll-interval: PT5S                 # worst case an alert escalates this long after escalate_at
     batch-size: 100                     # alerts claimed per transaction (SKIP LOCKED); a tick drains full batches
+  rollup:                   # scheduler profile only; reading_rollup for the AI summary in query-api
+    interval: ${VITALLINK_ROLLUP_INTERVAL:PT5M}
+    lookback: PT3H                      # whole hours recomputed per tick; later arrivals are not rolled up
   notifier:                 # notifier and notifier-critical profiles only
     digest-enabled: false               # open clinical decision: DAILY_DIGEST policy ignored until a clinician enables it
     listener-concurrency: 4

@@ -150,6 +150,7 @@ services:
       # evaluator: readings.ingested -> alert episodes (scales with partitions); notifier / notifier-critical:
       # alert events -> notification rows -> PUSH/SMS (logging fake providers); separate pods in production (D13)
       SPRING_PROFILES_ACTIVE: scheduler,relay,evaluator,notifier,notifier-critical
+      VITALLINK_ROLLUP_INTERVAL: PT15S   # reading_rollup for the AI summary; 5 min by default, short for the demo
     ports:
       - "127.0.0.1:8082:8082"
     healthcheck:
@@ -175,6 +176,8 @@ services:
       VITALLINK_QUERY_DB_PASSWORD: ${VITALLINK_QUERY_DB_PASSWORD:?set in .env}
       VITALLINK_REPLICA_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?set in .env}
       VITALLINK_DEV_JWT_SECRET: ${VITALLINK_DEV_JWT_SECRET:?set in .env}
+      # Deterministic stub LLM (no real provider): ok | timeout | error. e.g. VITALLINK_LLM_STUB_MODE=timeout docker compose up -d
+      VITALLINK_LLM_STUB_MODE: ${VITALLINK_LLM_STUB_MODE:-ok}
     ports:
       - "127.0.0.1:8083:8083"
     healthcheck:

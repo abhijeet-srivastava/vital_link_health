@@ -1,0 +1,1294 @@
+{
+  "info": {
+    "name": "VitalLink Readings & Alerting",
+    "description": "ingest-api (:8081) and query-api (:8083) against the local compose stack.\n\n1. docker compose up -d\n2. Select the 'VitalLink local' environment; set jwt_secret to VITALLINK_DEV_JWT_SECRET from .env and device_key to the key from: docker compose logs seed | grep 'device_id=2 key='\n3. Run the collection top to bottom (Runner) or request by request.\n\nBearer tokens are minted per request by the collection pre-request script (HS256 dev issuer, same claims as scripts/mint-dev-token.sh). Seed: coach 2 is PRIMARY of patient 2; patient 3 is outside coach 2's panel.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "ingest-api health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ingest_url}}/actuator/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "query-api health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{query_url}}/actuator/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Ingest API (device)",
+      "item": [
+        {
+          "name": "Ingest BP reading (systolic 186 -> CRITICAL alert)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-Key",
+                "value": "{{device_key}}"
+              },
+              {
+                "key": "X-Request-Id",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ingest_url}}/v1/devices/{{device_id}}/readings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"readings\": [\n    {\n      \"reading_id\": \"{{reading_id}}\",\n      \"device_seq\": 1,\n      \"type\": \"BLOOD_PRESSURE\",\n      \"measured_at\": \"{{measured_at}}\",\n      \"values\": { \"systolic\": 186, \"diastolic\": 94, \"pulse\": 78 },\n      \"unit\": \"mmHg\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "A new reading_id and measured_at (now) per run. The alert-worker opens a CRITICAL SYSTOLIC alert for coach {{coach_id}} a few seconds later."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('reading_id', pm.variables.replaceIn('{{$guid}}'));",
+                  "pm.collectionVariables.set('measured_at', new Date().toISOString().replace(/\\.\\d{3}Z$/, 'Z'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted, reading ACCEPTED', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "    const r = pm.response.json().results[0];",
+                  "    pm.expect(r.reading_id).to.eql(pm.collectionVariables.get('reading_id'));",
+                  "    pm.expect(r.status).to.eql('ACCEPTED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Retry the same batch (idempotent -> DUPLICATE)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-Key",
+                "value": "{{device_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ingest_url}}/v1/devices/{{device_id}}/readings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"readings\": [\n    {\n      \"reading_id\": \"{{reading_id}}\",\n      \"device_seq\": 1,\n      \"type\": \"BLOOD_PRESSURE\",\n      \"measured_at\": \"{{measured_at}}\",\n      \"values\": { \"systolic\": 186, \"diastolic\": 94, \"pulse\": 78 },\n      \"unit\": \"mmHg\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted, reading DUPLICATE', () => {",
+                  "    pm.response.to.have.status(202);",
+                  "    pm.expect(pm.response.json().results[0].status).to.eql('DUPLICATE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing X-Device-Key -> 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ingest_url}}/v1/devices/{{device_id}}/readings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"readings\": [\n    {\n      \"reading_id\": \"{{reading_id}}\",\n      \"device_seq\": 1,\n      \"type\": \"BLOOD_PRESSURE\",\n      \"measured_at\": \"{{measured_at}}\",\n      \"values\": { \"systolic\": 186, \"diastolic\": 94, \"pulse\": 78 },\n      \"unit\": \"mmHg\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wrong X-Device-Key -> 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Device-Key",
+                "value": "vl_0000000000000000_not-a-real-key"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ingest_url}}/v1/devices/{{device_id}}/readings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"readings\": [\n    {\n      \"reading_id\": \"{{reading_id}}\",\n      \"device_seq\": 1,\n      \"type\": \"BLOOD_PRESSURE\",\n      \"measured_at\": \"{{measured_at}}\",\n      \"values\": { \"systolic\": 186, \"diastolic\": 94, \"pulse\": 78 },\n      \"unit\": \"mmHg\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "Device-authenticated write path (X-Device-Key). Paste the seeded key for device 2 into device_key: docker compose logs seed | grep 'device_id=2 key='"
+    },
+    {
+      "name": "Readings (coach)",
+      "item": [
+        {
+          "name": "Latest blood pressure",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings/latest?type=BLOOD_PRESSURE",
+            "description": "Redis first (source=cache), Postgres replica fallback (source=db). Audited READ_LATEST_READING."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with a reading from cache or db', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.patient_id).to.eql(Number(pm.environment.get('patient_id')));",
+                  "    pm.expect(['cache', 'db']).to.include(b.source);",
+                  "    pm.expect(b.reading.systolic).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Range page 1 (limit=1)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings?type=BLOOD_PRESSURE&from={{range_from}}&to={{range_to}}&limit=1",
+            "description": "Keyset pagination on (measured_at DESC, reading_uuid); next_cursor is opaque."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = Date.now();",
+                  "pm.collectionVariables.set('range_from', new Date(now - 7 * 86400000).toISOString());",
+                  "pm.collectionVariables.set('range_to', new Date(now + 60000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, at most one item, newest first', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.items.length).to.be.at.most(1);",
+                  "    pm.collectionVariables.set('next_cursor', b.next_cursor || '');",
+                  "    pm.collectionVariables.set('page1_reading_id', b.items.length ? b.items[0].reading_id : '');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Range page 2 (cursor from page 1)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings?type=BLOOD_PRESSURE&from={{range_from}}&to={{range_to}}&limit=1&cursor={{next_cursor}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('next_cursor')) {",
+                  "    console.warn('Page 1 had no next_cursor (fewer than 2 readings in the last 7 days)');",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, next page does not repeat page 1', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const ids = pm.response.json().items.map(i => i.reading_id);",
+                  "    pm.expect(ids).to.not.include(pm.collectionVariables.get('page1_reading_id'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Range wider than 90 days -> 400",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings?type=BLOOD_PRESSURE&from=2026-01-01T00:00:00Z&to={{range_to}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = Date.now();",
+                  "pm.collectionVariables.set('range_from', new Date(now - 7 * 86400000).toISOString());",
+                  "pm.collectionVariables.set('range_to', new Date(now + 60000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 RANGE_TOO_WIDE', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('RANGE_TOO_WIDE');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "limit over 500 -> 400",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings?type=BLOOD_PRESSURE&from={{range_from}}&to={{range_to}}&limit=501"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = Date.now();",
+                  "pm.collectionVariables.set('range_from', new Date(now - 7 * 86400000).toISOString());",
+                  "pm.collectionVariables.set('range_to', new Date(now + 60000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 INVALID_LIMIT', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_LIMIT');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Tampered cursor -> 400",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings?type=BLOOD_PRESSURE&from={{range_from}}&to={{range_to}}&cursor=not-a-cursor"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const now = Date.now();",
+                  "pm.collectionVariables.set('range_from', new Date(now - 7 * 86400000).toISOString());",
+                  "pm.collectionVariables.set('range_to', new Date(now + 60000).toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 INVALID_CURSOR', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_CURSOR');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Alerts (coach)",
+      "item": [
+        {
+          "name": "Coach queue",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/coaches/{{coach_id}}/alerts",
+            "description": "Unresolved alerts of the caller's own panel; CRITICAL first, then oldest. Saves the first OPEN/ESCALATED alert for the requests below."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Give the alert-worker a moment to open the alert after the ingest requests.",
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const rank = { CRITICAL: 1, HIGH: 2, MEDIUM: 3 };",
+                  "const items = pm.response.json().items;",
+                  "pm.test('200, unresolved only', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    items.forEach(a => pm.expect(a.status).to.not.eql('RESOLVED'));",
+                  "});",
+                  "pm.test('ordered by severity, then oldest first', () => {",
+                  "    for (let i = 1; i < items.length; i++) {",
+                  "        const a = items[i - 1], b = items[i];",
+                  "        const ok = rank[a.severity] < rank[b.severity]",
+                  "            || rank[a.severity] === rank[b.severity] && a.created_at <= b.created_at;",
+                  "        pm.expect(ok, `${a.alert_id} before ${b.alert_id}`).to.be.true;",
+                  "    }",
+                  "});",
+                  "const ackable = items.find(a => a.status === 'OPEN' || a.status === 'ESCALATED');",
+                  "pm.collectionVariables.set('alert_id', ackable ? ackable.alert_id : '');",
+                  "pm.collectionVariables.set('alert_version', ackable ? ackable.version : '');",
+                  "pm.collectionVariables.set('alert_severity', ackable ? ackable.severity : '');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Queue with status=RESOLVED -> 400",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/coaches/{{coach_id}}/alerts?status=RESOLVED"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 INVALID_STATUS', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_STATUS');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Acknowledge without If-Match -> 428",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/alerts/{{alert_id}}/acknowledge"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('alert_id')) {",
+                  "    console.warn('No OPEN/ESCALATED alert in the queue; run \"Ingest\" then \"Coach queue\" first');",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('428 IF_MATCH_REQUIRED', () => {",
+                  "    pm.response.to.have.status(428);",
+                  "    pm.expect(pm.response.json().code).to.eql('IF_MATCH_REQUIRED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Acknowledge (If-Match current version) -> 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "\"{{alert_version}}\""
+              }
+            ],
+            "url": "{{query_url}}/v1/alerts/{{alert_id}}/acknowledge"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('alert_id')) {",
+                  "    console.warn('No OPEN/ESCALATED alert in the queue; run \"Ingest\" then \"Coach queue\" first');",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 ACKNOWLEDGED, ETag = version + 1', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const next = Number(pm.collectionVariables.get('alert_version')) + 1;",
+                  "    pm.expect(pm.response.json().status).to.eql('ACKNOWLEDGED');",
+                  "    pm.expect(pm.response.headers.get('ETag')).to.eql(`\"${next}\"`);",
+                  "    pm.collectionVariables.set('alert_version_after_ack', next);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Acknowledge again with stale If-Match -> 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "\"{{alert_version}}\""
+              }
+            ],
+            "url": "{{query_url}}/v1/alerts/{{alert_id}}/acknowledge"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('alert_id')) {",
+                  "    console.warn('No OPEN/ESCALATED alert in the queue; run \"Ingest\" then \"Coach queue\" first');",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('409 ALERT_CONFLICT with the current alert', () => {",
+                  "    pm.response.to.have.status(409);",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.code).to.eql('ALERT_CONFLICT');",
+                  "    pm.expect(b.current.version).to.eql(Number(pm.collectionVariables.get('alert_version_after_ack')));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resolve CRITICAL without a note -> 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "\"{{alert_version_after_ack}}\""
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/alerts/{{alert_id}}/resolve",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('alert_id')) {",
+                  "    console.warn('No OPEN/ESCALATED alert in the queue; run \"Ingest\" then \"Coach queue\" first');",
+                  "    pm.execution.skipRequest();",
+                  "}",
+                  "",
+                  "if (pm.collectionVariables.get('alert_severity') !== 'CRITICAL') {",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 RESOLUTION_NOTE_REQUIRED', () => {",
+                  "    pm.response.to.have.status(422);",
+                  "    pm.expect(pm.response.json().code).to.eql('RESOLUTION_NOTE_REQUIRED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Resolve with a note -> 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "If-Match",
+                "value": "\"{{alert_version_after_ack}}\""
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/alerts/{{alert_id}}/resolve",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"note\": \"Reviewed with the care team; follow-up booked\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('alert_id')) {",
+                  "    console.warn('No OPEN/ESCALATED alert in the queue; run \"Ingest\" then \"Coach queue\" first');",
+                  "    pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 RESOLVED', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().status).to.eql('RESOLVED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Access control",
+      "item": [
+        {
+          "name": "No token -> 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings/latest?type=BLOOD_PRESSURE"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forged token -> 401",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{forged_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/readings/latest?type=BLOOD_PRESSURE"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Same signature, payload changed to another coach: the HMAC no longer matches.",
+                  "const [h, p, s] = pm.collectionVariables.get('coach_token').split('.');",
+                  "const claims = JSON.parse(CryptoJS.enc.Utf8.stringify(CryptoJS.enc.Base64.parse(p.replace(/-/g, '+').replace(/_/g, '/'))));",
+                  "claims.sub = String(pm.environment.get('other_coach_id'));",
+                  "const forged = CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(JSON.stringify(claims)))",
+                  "    .replace(/=+$/, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+                  "pm.collectionVariables.set('forged_token', [h, forged, s].join('.'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patient outside the coach's panel -> 403 (audited DENIED)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{outside_patient_id}}/readings/latest?type=BLOOD_PRESSURE"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Another coach's queue -> 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/coaches/{{other_coach_id}}/alerts"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Token without alerts:read -> 403",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_readonly_token}}"
+              }
+            ],
+            "url": "{{query_url}}/v1/coaches/{{coach_id}}/alerts"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Thresholds (clinician)",
+      "item": [
+        {
+          "name": "Replace SYSTOLIC bands",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{clinician_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/thresholds/SYSTOLIC",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bands\": [\n    {\n      \"operator\": \"GT\",\n      \"limit\": 180,\n      \"severity\": \"CRITICAL\"\n    },\n    {\n      \"operator\": \"GT\",\n      \"limit\": 160,\n      \"severity\": \"HIGH\"\n    },\n    {\n      \"operator\": \"LT\",\n      \"limit\": 90,\n      \"severity\": \"MEDIUM\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Closes the open rows (valid_to), inserts new ones, emits thresholds.changed and evicts thr:{patient}:{measure}. changed=false on later runs (same bands)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200; when changed, three new open rules', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.measure).to.eql('SYSTOLIC');",
+                  "    if (b.changed) pm.expect(b.threshold_ids).to.have.lengthOf(3);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay the same bands -> no-op",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{clinician_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/thresholds/SYSTOLIC",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bands\": [\n    {\n      \"operator\": \"GT\",\n      \"limit\": 180,\n      \"severity\": \"CRITICAL\"\n    },\n    {\n      \"operator\": \"GT\",\n      \"limit\": 160,\n      \"severity\": \"HIGH\"\n    },\n    {\n      \"operator\": \"LT\",\n      \"limit\": 90,\n      \"severity\": \"MEDIUM\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200, changed=false, no new rows', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().changed).to.be.false;",
+                  "    pm.expect(pm.response.json().threshold_ids).to.be.empty;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Limit outside plausible range -> 400",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{clinician_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/thresholds/SYSTOLIC",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bands\": [\n    {\n      \"operator\": \"GT\",\n      \"limit\": 999,\n      \"severity\": \"CRITICAL\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 INVALID_BANDS', () => {",
+                  "    pm.response.to.have.status(400);",
+                  "    pm.expect(pm.response.json().code).to.eql('INVALID_BANDS');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Coach token without thresholds:write -> 403",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/v1/patients/{{patient_id}}/thresholds/SYSTOLIC",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"bands\": [\n    {\n      \"operator\": \"GT\",\n      \"limit\": 180,\n      \"severity\": \"CRITICAL\"\n    },\n    {\n      \"operator\": \"GT\",\n      \"limit\": 160,\n      \"severity\": \"HIGH\"\n    },\n    {\n      \"operator\": \"LT\",\n      \"limit\": 90,\n      \"severity\": \"MEDIUM\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Internal (service)",
+      "item": [
+        {
+          "name": "Assign primary coach",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{service_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/internal/v1/care-assignments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"coach_id\": {{coach_id}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Re-affirms the seeded primary coach, so the coach requests above keep working. Point coach_id at another coach to watch the patient's unresolved alerts move."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with moved_alerts', () => {",
+                  "    pm.response.to.have.status(200);",
+                  "    pm.expect(pm.response.json().coach_id).to.eql(Number(pm.environment.get('coach_id')));",
+                  "    pm.expect(pm.response.json().moved_alerts).to.be.a('number');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Coach token -> 403",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{coach_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{query_url}}/internal/v1/care-assignments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_id\": {{patient_id}},\n  \"coach_id\": {{coach_id}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 ACCESS_DENIED', () => {",
+                  "    pm.response.to.have.status(403);",
+                  "    pm.expect(pm.response.json().code).to.eql('ACCESS_DENIED');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Mints the dev-issuer HS256 tokens query-api accepts (same claims as scripts/mint-dev-token.sh).",
+          "const secret = pm.environment.get('jwt_secret') || '';",
+          "const b64url = (words) => CryptoJS.enc.Base64.stringify(words)",
+          "    .replace(/=+$/, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+          "const json64 = (obj) => b64url(CryptoJS.enc.Utf8.parse(JSON.stringify(obj)));",
+          "function mint(sub, actor, scope) {",
+          "    const now = Math.floor(Date.now() / 1000);",
+          "    const unsigned = json64({ alg: 'HS256', typ: 'JWT' }) + '.' + json64({",
+          "        iss: pm.environment.get('jwt_issuer'), aud: pm.environment.get('jwt_audience'),",
+          "        sub: String(sub), vl_actor: actor, scope: scope, iat: now, exp: now + 3600 });",
+          "    return unsigned + '.' + b64url(CryptoJS.HmacSHA256(unsigned, secret));",
+          "}",
+          "if (secret.length < 32) {",
+          "    console.warn('jwt_secret must be VITALLINK_DEV_JWT_SECRET from .env (at least 32 bytes); query-api calls will be 401');",
+          "}",
+          "const coach = pm.environment.get('coach_id');",
+          "pm.collectionVariables.set('coach_token', mint(coach, 'COACH', 'readings:read alerts:read alerts:write'));",
+          "pm.collectionVariables.set('coach_readonly_token', mint(coach, 'COACH', 'readings:read'));",
+          "pm.collectionVariables.set('clinician_token', mint(pm.environment.get('clinician_sub'), 'CLINICIAN', 'thresholds:write'));",
+          "pm.collectionVariables.set('service_token', mint(pm.environment.get('service_sub'), 'SERVICE', 'assignments:write'));"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// query-api errors are RFC 7807 problem+json with a machine-readable code.",
+          "if (pm.response.code >= 400 && pm.request.url.toString().startsWith(pm.environment.get('query_url'))) {",
+          "    pm.test('error body is problem+json with a code', () => {",
+          "        pm.expect(pm.response.headers.get('Content-Type')).to.include('application/problem+json');",
+          "        pm.expect(pm.response.json()).to.have.property('code');",
+          "    });",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "coach_token",
+      "value": ""
+    },
+    {
+      "key": "coach_readonly_token",
+      "value": ""
+    },
+    {
+      "key": "clinician_token",
+      "value": ""
+    },
+    {
+      "key": "service_token",
+      "value": ""
+    },
+    {
+      "key": "forged_token",
+      "value": ""
+    },
+    {
+      "key": "reading_id",
+      "value": ""
+    },
+    {
+      "key": "measured_at",
+      "value": ""
+    },
+    {
+      "key": "range_from",
+      "value": ""
+    },
+    {
+      "key": "range_to",
+      "value": ""
+    },
+    {
+      "key": "next_cursor",
+      "value": ""
+    },
+    {
+      "key": "page1_reading_id",
+      "value": ""
+    },
+    {
+      "key": "alert_id",
+      "value": ""
+    },
+    {
+      "key": "alert_version",
+      "value": ""
+    },
+    {
+      "key": "alert_version_after_ack",
+      "value": ""
+    },
+    {
+      "key": "alert_severity",
+      "value": ""
+    }
+  ]
+}

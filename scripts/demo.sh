@@ -11,6 +11,9 @@
 #                            unresolved SYSTOLIC alert (running 'critical' first when there is none); acknowledges it
 #                            with the current version (200), then again with the now stale one (409 + current alert);
 #                            and the same coach reading patient 3 (not in the panel) gets 403
+#   scripts/demo.sh summary  ingest a reading, wait for alert-worker's RollupJob to roll it up, then coach 2 asks for
+#                            patient 2's AI summary twice (stub LLM: source llm, the second from the 15 min cache).
+#                            With VITALLINK_LLM_STUB_MODE=timeout docker compose up -d: source rules after ~2 s
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -224,10 +227,41 @@ queue() {
               WHERE actor_type = 'COACH' AND actor_id = '$COACH_ID' ORDER BY at DESC LIMIT 4"
 }
 
+summary() {
+  local token deadline
+  wait_ready "$QUERY_URL"
+  ingest
+  echo "== waiting for the rollup job to cover the reading (reading_rollup, every 15 s in compose)"
+  deadline=$((SECONDS + 60))
+  until [ "$(psql_value "SELECT count(*) FROM reading_rollup WHERE patient_id = $PATIENT_ID
+                         AND updated_at >= (SELECT received_at FROM reading WHERE reading_uuid = '$READING_ID')")" -gt 0 ]; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "no rollup after 60s; see: docker compose logs alert-worker" >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  # Demo reset: drop a summary cached by an earlier run, so this run shows the current stub mode.
+  docker compose exec -T redis redis-cli DEL "summary:$PATIENT_ID" > /dev/null
+  token=$(scripts/mint-dev-token.sh "$COACH_ID")
+  echo "== coach $COACH_ID asks for patient $PATIENT_ID's summary (stub ok: source llm; stub timeout: source rules after ~2 s)"
+  curl -sS -w '\nhttp %{http_code} in %{time_total}s\n' -H "Authorization: Bearer $token" \
+    "$QUERY_URL/v1/patients/$PATIENT_ID/summary"
+  echo "== again (an llm summary now comes from the cache, summary:$PATIENT_ID; a rules one is never cached)"
+  curl -sS -w '\nhttp %{http_code} in %{time_total}s\n' -H "Authorization: Bearer $token" \
+    "$QUERY_URL/v1/patients/$PATIENT_ID/summary"
+  echo "== coach $COACH_ID asks for patient $OUTSIDE_PATIENT_ID's summary, not in the panel (expect 403, audited DENIED)"
+  curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $token" \
+    "$QUERY_URL/v1/patients/$OUTSIDE_PATIENT_ID/summary"
+  psql_value "SELECT action, outcome, patient_id FROM audit_log
+              WHERE actor_type = 'COACH' AND actor_id = '$COACH_ID' AND action = 'READ_SUMMARY' ORDER BY at DESC LIMIT 3"
+}
+
 case "${1:-}" in
   ingest) ingest ;;
   relay) relay ;;
   critical) critical ;;
   queue) queue ;;
-  *) echo "usage: $0 ingest|relay|critical|queue" >&2; exit 2 ;;
+  summary) summary ;;
+  *) echo "usage: $0 ingest|relay|critical|queue|summary" >&2; exit 2 ;;
 esac
