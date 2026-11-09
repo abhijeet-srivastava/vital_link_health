@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
@@ -25,6 +26,7 @@ import com.vitallink.readings.domain.DeviceKeys;
  */
 @Component
 @Profile("seed")
+@ConditionalOnExpression("'${vitallink.seed.load-keys-file:}'.isEmpty()")   // load-key runs leave demo keys alone
 public class DevCredentialSeeder implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(DevCredentialSeeder.class);

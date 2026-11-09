@@ -26,6 +26,8 @@ them with the k6 load test before treating them as limits.
 - One multi-row `INSERT … ON CONFLICT DO NOTHING RETURNING` (via `unnest`) + one outbox insert per
   request, in one short transaction.
 - Java 21 virtual threads; HikariCP ~20 connections per pod behind PgBouncer (transaction mode).
+- Virtual threads: no blocking I/O inside `synchronized` or a cache `compute` loader (JDK 21 pins the
+  carrier; with pool-size concurrency this deadlocks). Use async cache loaders and jitter cache expiry.
 - Auth, validation, plausibility and rate limits before touching the DB.
 - Redis latest-reading update after commit, best-effort.
 - Stateless pods; HPA on CPU and in-flight requests; scheduled pre-scale from 5:30 AM.

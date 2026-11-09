@@ -3,6 +3,8 @@ package com.vitallink.readings.ingest.config;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -72,9 +74,16 @@ public class IngestConfig {
         return new JdbcMeasureCatalog(jdbc);
     }
 
+    /** Runs credential cache loads off the request thread, outside the cache's map lock (see CachingDeviceDirectory). */
+    @Bean(destroyMethod = "close")
+    ExecutorService credentialLoader() {
+        return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("credential-loader-", 0).factory());
+    }
+
     @Bean
-    DeviceDirectory deviceDirectory(JdbcClient jdbc) {
-        return new CachingDeviceDirectory(new JdbcDeviceDirectory(jdbc), CREDENTIAL_TTL, CREDENTIAL_CACHE_SIZE);
+    DeviceDirectory deviceDirectory(JdbcClient jdbc, ExecutorService credentialLoader) {
+        return new CachingDeviceDirectory(new JdbcDeviceDirectory(jdbc), CREDENTIAL_TTL, CREDENTIAL_CACHE_SIZE,
+                credentialLoader);
     }
 
     @Bean
