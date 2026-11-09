@@ -1,4 +1,4 @@
-# Part C: AI reading summary
+# AI integration: AI reading summary
 
 ## What it does
 
@@ -35,7 +35,7 @@ for 15 min → `ALLOWED` audit → response. Any LLM problem gives the rule-base
 | PHI leaving the boundary | The prompt is built only from rollups: no patient, device or reading ids, no dates (only "h-3", meaning 3 hours ago), no free text (`extras` and notes never reach the rollup). Every data line has a fixed shape, `MEASURE unit \| h-N \| n= min= max= avg=`, and a test checks each line against that pattern. Logs carry the fallback reason only, never the prompt or the answer |
 | Unauthorised access | Same panel check and audit as other PHI reads (`READ_SUMMARY`, `DENIED` audited before the `403`); row-level security on `reading_rollup` repeats the check in the database |
 | Treated as clinical advice | `advisory: true` and a label on every response. Severity, escalation and notification never read the summary (rule 8). The instructions forbid diagnosis, treatment advice and urgency judgements. The answer is capped at 1,200 characters |
-| Wrong or invented numbers | Instructions say to use only the given numbers; the evaluation below measures this. The rule-based text is always available as a reference |
+| Wrong or invented numbers | Instructions say to use only the given numbers. The rule-based text is always available as a reference |
 
 ## Cost per day at 1M patients
 
@@ -69,28 +69,3 @@ Other costs:
   the current day partition. At full scale it should update rollups incrementally from
   `readings.ingested` instead.
 - **Redis.** About 1 KB per cached summary. Even 1M live keys is ~1 GB.
-
-## How I would evaluate it
-
-1. **Offline set before launch.** About 500 real rollup windows, de-identified and stratified by
-   measure mix, normal versus breaching, and sparse versus dense. For each one, run automated checks:
-   - every number in the answer appears in the prompt, or is a min, max or mean derivable from it
-     (faithfulness);
-   - every measure that has data is mentioned (coverage);
-   - a deny-list catches diagnosis, medication and urgency wording;
-   - the answer stays within the length limit;
-   - the answer matches the rule-based facts (range, count).
-
-   Each prompt or model change re-runs this set, and the change ships only if no metric drops.
-2. **Clinician review.** Clinicians rate a weekly random sample (~50, plus every summary where the
-   patient has an open CRITICAL alert) for accuracy, omissions and anything that reads like clinical
-   advice. Any harmful output stops the feature (set the stub mode or budget to 0 → rules for
-   everyone) until it is fixed.
-3. **Shadow, then compare.** First generate summaries without showing them, and compare them with
-   the rule-based text. Then show them to some coaches. Measure:
-   - time from opening a patient to acknowledging their alert;
-   - coach thumbs up or down;
-   - how often coaches still open the raw readings.
-4. **Operations.** Track latency p95, fallback rate (> 20% sustained means the provider or the
-   budget is wrong), daily tokens against the budget, and cache hit rate. These need the metrics
-   work that was dropped with Stage 9.
