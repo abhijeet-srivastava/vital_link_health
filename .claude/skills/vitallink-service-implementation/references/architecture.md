@@ -36,23 +36,32 @@ relay (Debezium CDC in production; `FOR UPDATE SKIP LOCKED` poller locally), Red
    threshold bands, writes episodes + occurrences + outbox set-based in one transaction.
 3. Relay publishes `alerts.raised` or `alerts.raised.critical` for new episodes and upgrades.
 4. Notifier writes one `notification` per change, coach and channel; senders deliver PUSH/SMS.
+   Groups `notifier` (`alerts.raised`) and `notifier-critical` (`alerts.raised.critical`, and
+   `alert.state_changed` in a container of its own, D32), one per profile; per record, offset after commit, then
+   `<topic>.dlq`. QUEUE rows are stored `SENT`. Senders claim `PENDING` rows per channel with
+   `SKIP LOCKED` (CRITICAL first; the critical pods claim CRITICAL only) within a per-provider
+   token bucket that reserves a share for CRITICAL.
 5. Escalation scheduler escalates CRITICAL alerts still `OPEN` at `escalate_at`.
 
 ### Reads
 
 query-api reads Redis for latest values, replicas for ranges and the coach queue, keyset
-pagination only, always scoped by patient (and coach panel for coaches).
+pagination only, always scoped by patient (and coach panel for coaches). Coach-facing pools log in as
+`vitallink_query`, so PostgreSQL row-level security repeats the panel check on `reading` and `alert`
+(`SET LOCAL app.coach_id` per transaction, D34). A latest-reading cache miss falls back to the replica
+and backfills Redis through the same compare-and-set ingest uses.
 
 ## Kafka topics
 
 | Topic | Key | Partitions | Producer | Consumers |
 | --- | --- | --- | --- | --- |
 | `readings.ingested` | `patient_id` | 128 | ingest outbox | evaluator |
-| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier, AI triage |
-| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group |
-| `alert.state_changed` | `patient_id` | 32 | alerting outbox | notifier (escalation, reassignment), audit export |
+| `alerts.raised` | `patient_id` | 32 | alerting outbox | notifier (group `notifier`), AI triage, summary cache eviction (query-api, group `query-summary-eviction`) |
+| `alerts.raised.critical` | `patient_id` | 16 | alerting outbox | critical notifier group (`notifier-critical`), summary cache eviction (query-api, group `query-summary-eviction`) |
+| `alert.state_changed` | `patient_id` | 32 | alerting outbox | critical notifier group (`notifier-critical`, own container: escalation, reassignment), audit export |
 | `thresholds.changed` | `patient_id` | 8 | threshold API outbox | all pods (cache eviction) |
 | `device.binding_changed` | `device_id` | 8 | device admin outbox | ingest pods (cache eviction) |
+| `readings.ingested.retry` | `patient_id` | 128 | alert-evaluator batch listener, for an event that failed on the per-event path too (D29) | alert-evaluator (group `alert-evaluator.retry`), per record with fixed backoff, then `.dlq` |
 | `<topic>.dlq` | same | same | consumers after N retries | ops tooling |
 
 Partition counts are set up front: adding partitions later remaps keys and breaks per-patient
@@ -64,16 +73,28 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 ```json
 { "event_id": "0192f3c4-7a1e-7b2c-9d10-5e6f7a8b9c0d", "type": "readings.ingested", "schema_version": 1,
   "patient_id": 8812, "device_id": 50311,
-  "readings": [ { "reading_uuid": "7c1e...", "reading_type": "BLOOD_PRESSURE",
+  "readings": [ { "reading_uuid": "7c1e...", "reading_type": "BLOOD_PRESSURE", "device_seq": 10422,
                   "measured_at": "2026-11-07T06:42:10Z", "systolic": 186, "diastolic": 94, "pulse": 78 } ] }
+// single-value types (glucose mg/dL, SpO2 %, weight kg) carry "value" in the canonical unit; null fields are omitted
 
 { "event_id": "...", "type": "alerts.raised", "schema_version": 1,
   "alert_id": 99102, "patient_id": 8812, "coach_id": 41, "measure": "SYSTOLIC",
   "observed_value": 186, "severity": "CRITICAL", "reason": "RAISED", "threshold_id": 7,
   "occurrence_cnt": 1, "is_late": false }
+// reason RAISED (new episode) or SEVERITY_UPGRADED (same alert_id, severity raised in place); severity CRITICAL ->
+// topic alerts.raised.critical, otherwise alerts.raised. Repeat breaches at the same or lower severity emit nothing.
 
-{ "event_id": "...", "type": "alert.state_changed", "alert_id": 99102,
-  "from": "OPEN", "to": "ESCALATED", "actor": "scheduler", "alert_version": 3 }
+{ "event_id": "...", "type": "alert.state_changed", "schema_version": 1,
+  "alert_id": 99102, "patient_id": 8812, "coach_id": 41, "measure": "SYSTOLIC", "severity": "CRITICAL",
+  "from": "OPEN", "to": "ESCALATED", "reason": "ESCALATED",
+  "actor_type": "SERVICE", "actor_id": "escalation-scheduler", "alert_version": 3 }
+// reason ACKNOWLEDGED | RESOLVED | ESCALATED | REASSIGNED (from = to; adds "previous_coach_id"). actor_type COACH
+// carries the coach id as actor_id. Never the resolution note. Topic alert.state_changed, key patient_id.
+
+{ "event_id": "...", "schema_version": 1, "patient_id": 8812, "measure_code": 1,
+  "closed_threshold_ids": [301, 302], "threshold_ids": [911, 912, 913] }
+// thresholds.changed: a clinician replaced the patient's override bands for one measure (empty threshold_ids =
+// override removed, program defaults apply again). IDs only; consumers evict and reload. Key patient_id.
 ```
 
 ## Caching (Redis + in-process Caffeine L1)
@@ -83,9 +104,10 @@ ordering during the change. Event payloads carry IDs and values only and a `sche
 | `latest:{patientId}:{readingType}` | Latest reading | After commit, Lua compare-and-set on `measured_at` | Never overwritten by older; TTL 7 days |
 | `thr:{patientId}:{measureCode}` | Effective threshold bands | Cache-aside, TTL 10 min (jittered) | `DEL` on change + `thresholds.changed` evicts L1 |
 | `dev:{keyId}` | Device id, current binding | Cache-aside, TTL 5 min | Evicted on rotation, revocation, rebinding |
+| `rate:{deviceId}` | Per-device token bucket (tokens, last refill) | Lua script per ingest request, Redis clock | Expiry once full; on Redis loss, no rate limit (fail open) |
 | `idem:{deviceId}:{readingUuid}` | Seen marker | `SET NX`, TTL 24 h | Expiry only; DB key is the guarantee |
 | `confirm:{patientId}:{measureCode}` | Recent breach timestamps (confirmation rule) | Sorted set, trimmed to window | Expiry; on Redis loss, alert immediately |
-| `summary:{patientId}` | AI summary | Cache-aside, TTL 15 min | Evicted on new alert |
+| `summary:{patientId}` | AI summary (LLM answers only; rule-based fallbacks are not cached) | Cache-aside, TTL 15 min | Evicted on `alerts.raised` and `alerts.raised.critical` |
 
 Redis is never required for correctness: every miss or outage falls back to the database.
 

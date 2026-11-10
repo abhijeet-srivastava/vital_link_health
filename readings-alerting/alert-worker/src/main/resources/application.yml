@@ -1,0 +1,96 @@
+# Secrets and endpoints come from the environment (.env in compose); nothing secret is committed.
+spring:
+  application:
+    name: alert-worker
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${VITALLINK_DB_URL}
+    username: ${VITALLINK_DB_USER}
+    password: ${VITALLINK_DB_PASSWORD}
+  flyway:
+    enabled: false   # migrations run from the one-shot flyway container (compose) or the test base
+  kafka:
+    bootstrap-servers: ${VITALLINK_KAFKA_BOOTSTRAP}
+    admin:
+      fail-fast: true   # topics are created on startup (TopicsConfig); broker auto-create is off
+  data:
+    redis:                    # threshold cache L2 (evaluator profile); fail-open, so keep timeouts short
+      host: ${VITALLINK_REDIS_HOST}
+      port: ${VITALLINK_REDIS_PORT:6379}
+      timeout: 250ms
+      connect-timeout: 250ms
+
+vitallink:
+  kafka:
+    replication-factor: 1   # 3 in production (min.insync.replicas follows as 2)
+  relay:                    # relay profile only
+    poll-interval: PT0.1S
+    ack-timeout: PT30S
+    max-backoff: PT5S
+  alerting:                 # evaluator profile only
+    reopen-on-critical: true            # open clinical decision: ACKNOWLEDGED + rise to CRITICAL -> OPEN
+    multi-program-policy: MOST_CONSERVATIVE   # open clinical decision; FIRST_ENROLLED is the alternative
+    escalation-window: PT15M
+    late-after: P7D
+    threshold-cache-ttl: PT10M
+    threshold-cache-size: 200000
+    max-retries: 3                      # on readings.ingested.retry (main topic never blocks), then readings.ingested.dlq
+    retry-interval: PT5S
+    listener-concurrency: 4
+    batch-max-records: 500              # one transaction per poll: <= 500 events ...
+    batch-max-wait: PT0.2S              # ... or 200 ms, whichever comes first
+    batch-min-bytes: 65536              # ~100+ events; below this the broker waits up to batch-max-wait
+    send-timeout: PT10S
+  escalation:               # scheduler profile only; the window is alerting.escalation-window (applied at raise)
+    poll-interval: PT5S                 # worst case an alert escalates this long after escalate_at
+    batch-size: 100                     # alerts claimed per transaction (SKIP LOCKED); a tick drains full batches
+  rollup:                   # scheduler profile only; reading_rollup for the AI summary in query-api
+    interval: ${VITALLINK_ROLLUP_INTERVAL:PT5M}
+    lookback: PT3H                      # whole hours recomputed per tick; later arrivals are not rolled up
+  notifier:                 # notifier and notifier-critical profiles only
+    digest-enabled: false               # open clinical decision: DAILY_DIGEST policy ignored until a clinician enables it
+    listener-concurrency: 4
+    max-retries: 3                      # redeliveries of a failing record, then <topic>.dlq
+    retry-interval: PT2S
+    sender-poll-interval: PT0.5S        # worst case a due PUSH/SMS waits this long
+    batch-size: 20                      # rows claimed per sender transaction (held during the provider calls)
+    max-attempts: 5                     # provider calls, then FAILED
+    backoff-base: PT5S                  # 5 s, 10 s, 20 s, 40 s ...
+    backoff-cap: PT5M
+    backoff-jitter: 0.2
+    provider-timeout: PT2S
+    push:                               # per pod; divide the provider's account limit by the pod count
+      capacity: 100
+      refill-per-second: 50
+      critical-reserved-share: 0.2      # only CRITICAL may use the last 20% of the bucket
+    sms:
+      capacity: 20
+      refill-per-second: 10
+      critical-reserved-share: 0.3
+
+server:
+  port: 8082
+  shutdown: graceful
+
+management:
+  health:
+    redis:
+      enabled: false   # Redis is a cache tier only; its loss must not mark the worker unhealthy
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-components: always
+      probes:
+        enabled: true
+
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      customizer: com.vitallink.readings.observability.PhiScrubbingJsonMembersCustomizer

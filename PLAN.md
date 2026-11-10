@@ -24,7 +24,7 @@ Precedence (CLAUDE.md): the skill (`references/schema.sql` first) > `docs/design
 ```
 pom.xml (parent), mvnw, .mvn/
 readings-alerting/
-  common/        domain/, ports/, persistence/, messaging/, observability/   (com.vitallink.readings.*)
+  common/        domain/, ports/, persistence/, messaging/, observability/ (PHI log scrubber only)   (com.vitallink.readings.*)
   db/            src/main/resources/db/migration (Flyway); test-jar: Testcontainers base classes
   ingest-api/    Spring Boot app
   alert-worker/  Spring Boot app; profiles: evaluator, notifier, notifier-critical, scheduler, relay
@@ -191,17 +191,9 @@ Panel check in the controller and again by Postgres RLS (`SET LOCAL app.coach_id
 
 **Gate**: `./mvnw -pl readings-alerting/query-api -am verify`; with compose up, `scripts/demo.sh queue` shows the stage-5 alert in the seeded coach's queue and a stale `If-Match` acknowledge returns `409`.
 
-## Stage 9 — Observability (lean)
+## Stage 9 — Observability: dropped (2026-11-09)
 
-**References**: performance-and-scaling.md (what to measure).
-
-**Scope**: Micrometer metrics exposed at `/actuator/prometheus` (no Prometheus/Grafana containers; dashboards and alert thresholds described in Part B). Ingest timers per stage (auth, insert, outbox), duplicate and CONFLICT counters, DEFAULT-partition rows, outbox backlog, consumer lag, evaluator batch size / commit latency / fallback count, critical ingest→queue latency, new episodes per coach per day (no coach ID label; per-coach view via SQL), DLQ depth. Tags never carry patient or coach IDs.
-
-**Files**: `common/observability/{Metrics,PhiSafeTags}.java`, wiring in each app.
-
-**Tests first**: `metric_tags_never_contain_patient_or_coach_ids`, `log_scrubber_blocks_phi_tagged_fields`, `critical_ingest_to_queue_latency_is_recorded`.
-
-**Gate**: `./mvnw verify -Dtest='*Observability*,*Metric*' -Dsurefire.failIfNoSpecifiedTests=false`; `curl -s localhost:8081/actuator/prometheus | grep vitallink_ingest`.
+Not part of the demo. No Micrometer/Prometheus metrics, dashboards or metric tests. Stage numbers 10–13 are kept as they were. The PHI log scrubber from stage 1 stays (it is a PHI rule, not observability); its test `log_scrubber_blocks_phi_tagged_fields` moves to stage 12. Monitoring is described in Part B only.
 
 ## Stage 10 — AI feature (Part C): reading summary, stubbed LLM
 
@@ -234,7 +226,7 @@ Panel check in the controller and again by Postgres RLS (`SET LOCAL app.coach_id
 
 ## Stage 12 — Review
 
-**Scope**: SKILL.md review checklist over the whole repo; `/code-review` and `/security-review` on the branch; map all eight guards and every `testing.md` row to a named test; fix findings test-first; dated lines in `references/decisions.md` for any decision change; list any remaining skill vs design.md conflicts.
+**Scope**: SKILL.md review checklist over the whole repo; add `log_scrubber_blocks_phi_tagged_fields` (moved from dropped stage 9); `/code-review` and `/security-review` on the branch; map all eight guards and every `testing.md` row to a named test; fix findings test-first; dated lines in `references/decisions.md` for any decision change; list any remaining skill vs design.md conflicts.
 
 **Gate**: `./mvnw clean verify` green; checklist table (item → test/file) with no open items.
 
@@ -258,7 +250,7 @@ Panel check in the controller and again by Postgres RLS (`SET LOCAL app.coach_id
 2. Flyway runs as a one-shot owner-role container so apps use a least-privilege role.
 3. Coach/clinician write endpoints and the internal care-assignment endpoint live in query-api; the skill assigns them to no deployable.
 4. `reading_rollup` table added in stage 10 (required by performance-and-scaling.md for summaries, missing from `schema.sql`); `schema.sql` updated in the same stage.
-5. Lean-scope items that remain documented instead of coded: confirmation rule and daily digest are **not implemented**, only flags defaulting to off (the skill's safe default). Setting either to `true` fails start-up with a clear message, so the controls can't look enabled when they aren't. No Prometheus/Grafana containers (metrics endpoint only).
+5. Lean-scope items that remain documented instead of coded: confirmation rule and daily digest are **not implemented**, only flags defaulting to off (the skill's safe default). Setting either to `true` fails start-up with a clear message, so the controls can't look enabled when they aren't. Observability (metrics, dashboards) is not built at all (stage 9 dropped, not part of the demo); described in Part B only.
 
 **Repo instruction conflict**: `CLAUDE.md` says `./gradlew`; you chose Maven. Stage 1 updates `CLAUDE.md` and `.claude/settings.json` to `./mvnw`.
 
@@ -288,6 +280,7 @@ Each flag is named in the report of the stage that introduces it.
 | design.md | Updated by you; skill wins on conflicts (CLAUDE.md precedence) |
 | Reassignment / rebinding | Seed data + internal admin endpoint; real projection feed out of scope |
 | Commits | Feature branch, commit per stage after its gate |
+| Observability (2026-11-09) | Dropped: not part of the demo; stage 9 removed |
 
 ## Verification (whole plan)
 

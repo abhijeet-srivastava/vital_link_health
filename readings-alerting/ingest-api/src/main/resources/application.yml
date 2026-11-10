@@ -1,0 +1,65 @@
+# Secrets and endpoints come from the environment (.env in compose); nothing secret is committed.
+spring:
+  application:
+    name: ingest-api
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: ${VITALLINK_DB_URL}
+    username: ${VITALLINK_DB_USER}
+    password: ${VITALLINK_DB_PASSWORD}
+  flyway:
+    enabled: false   # migrations run from the one-shot flyway container (compose) or the test base
+  data:
+    redis:
+      host: ${VITALLINK_REDIS_HOST}
+      port: ${VITALLINK_REDIS_PORT:6379}
+      timeout: 250ms           # latest-reading update is best effort: never hold a request on Redis
+      connect-timeout: 250ms
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+vitallink:
+  device-keys:
+    pepper: ${VITALLINK_DEVICE_KEY_PEPPER:}   # HMAC pepper for device API keys (KMS in production)
+  ingest:
+    max-batch-size: 500
+    max-future-skew: PT5M      # measured_at beyond now + skew -> FUTURE_TIMESTAMP
+    # Open clinical decision (PLAN.md flags): reject readings older than this with READING_TOO_OLD.
+    # Blank disables; such readings then land in reading_default (alarmed).
+    reject-older-than: ${VITALLINK_INGEST_REJECT_OLDER_THAN:P90D}
+    latest-ttl: P30D
+    backpressure:              # 503 + jittered Retry-After when overloaded; 429 per device (Redis, fails open)
+      max-in-flight: 64        # per pod; above the Hikari pool (10) so short waits queue, sustained overload sheds
+      max-outbox-age: PT60S    # oldest unpublished event older than this: relay or Kafka is down
+      max-outbox-rows: 100000
+      outbox-sample-interval: PT2S
+      retry-after-min: PT5S
+      retry-after-max: PT30S
+      device-burst: 30         # a device normally sends a few batches of up to 500 readings
+      device-requests-per-minute: 60
+
+server:
+  port: 8081
+  shutdown: graceful
+
+management:
+  health:
+    redis:
+      enabled: false           # Redis down must not mark ingest unhealthy (rule 4: best effort after commit)
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-components: always
+      probes:
+        enabled: true
+
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      customizer: com.vitallink.readings.observability.PhiScrubbingJsonMembersCustomizer
