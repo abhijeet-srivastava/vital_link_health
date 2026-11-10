@@ -333,6 +333,9 @@ I used Claude Code to generate the design scaffolding and code, but I kept the c
     - Notifier
     - Query API
   - Each stage had a defined scope and its own validation gate checks.
-  - For each stage, I first prompted for a plan, reviewed it, and generated code only once I was satisfied with the plan.
+  - Each stage start with writing test cases around expected output of that stage, these test cases are functional, and concurrency, failure edge case as well.
+  - I manually reviewed test cases, added missing behavior wherever required.
+  - Then prompted agent to generate implementation to satisfy test cases.
+  - Each stage has it own harness abd evolution, making its implementation most rigorous and error proof.
   - After each stage, I ran a gate check to confirm the stage’s output matched the plan.
   - Finally, I ran an independent review through a Claude subagent, validating the work across all stages
